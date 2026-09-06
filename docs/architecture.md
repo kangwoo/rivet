@@ -689,6 +689,25 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    바꿀지 Phase 4에서 결정.
 8. **Slot별 계약 버전 독립 진화** — `CapabilityKind::version()`이 아직 모든 슬롯에 대해
    `0.1`을 반환한다. 실제로 슬롯이 따로 움직이기 시작하는 Phase 6에서 구현.
+9. **Provider egress와 tool egress가 같은 권한을 쓴다** — Phase 2에서 `manifest ∩ profile`이
+   실제로 계산되기 시작하자, `NetworkHttp`를 주지 않는 프로파일은 `rivet.model-openai`가
+   빈 권한이 되어 **에이전트를 아예 못 돌리게** 된다. 잠정 답으로 모든 프로파일이
+   `NetworkHttp(None)`을 준다 (`config.rs:237`). 그 대가로 "네트워크 없는 프로파일"을
+   어휘가 표현할 수 없게 됐고, `security.md` §8 표의 `network ✗` 열은 tool egress만
+   가리키게 됐다. **Phase 4의 sandbox가 이걸 물려받기 전에 의도적으로 다시 열어야 한다** —
+   provider 호출을 막는 프로파일이 필요하면 별도 permission이 필요하고 그건 `rivet-core`
+   변경이다. 근거: [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) §7-1.
+10. **`Permission::EventsSubscribe`를 주는 프로파일이 없다** — Phase 2에서 아무도 요청하지
+   않아 그대로 뒀지만, **Phase 3의 `telemetry.log` plugin이 첫날 빈 권한으로 막힌다.**
+   Phase 3 착수 시점에 어느 프로파일이 이걸 주는지 정해야 한다. 근거: 같은 문서 §7-3.
+11. **`Interceptor`에 대응하는 `CapabilityKind`가 없다** — manifest guard가
+   `register_interceptor`를 선언된 슬롯에 매핑할 수 없어 잠정적으로 `capabilities = ["policy"]`를
+   요구한다. 변형을 추가하는 것은 닫힌 어휘를 넓히는 `rivet-core` 변경이라 Phase 2 범위 밖으로
+   뒀다. interceptor가 실제로 실행되는 Phase 4에서 결정. 근거: 같은 문서 §7-2.
+12. **CLI에 남은 마지막 하드코딩 plugin id** — `Config::api_key_env()`가 자격 증명을 미리
+   확인하려고 `[plugins."rivet.model-openai"]`를 직접 들여다본다. host가 특정 plugin의 설정
+   키를 아는 것으로, Phase 2가 없앤 바로 그 종류의 결합이다. 더 나은 에러를 만들어 내므로
+   남겨 뒀지만 부채다. 근거: 같은 문서 §7-7.
 
 ---
 
