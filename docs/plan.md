@@ -137,7 +137,10 @@ rivet "list the files here and explain what this project does"
 
 ### DoD
 
-- [ ] 실제 provider로 왕복 대화가 동작 — **미검증**[^live]
+- [x] 실제 provider로 왕복 대화가 동작
+      (수동 검증: `rivet "list the files here and explain what this project does"` →
+      `list_dir` → `read_file` → 모델이 두 결과를 모두 사용해 답변, 3턴 `done`,
+      3384 in / 581 out 토큰. 세션 `ses_01a07637`)
 - [x] tool call → 파일 읽기 → 모델이 결과를 사용
       (`rivet-cli/tests/e2e.rs::a_prompt_runs_a_tool_and_the_model_sees_its_result`:
       두 번째 요청의 메시지 배열에 파일 내용이 담긴 tool result가 있음을 단언)
@@ -156,11 +159,6 @@ rivet "list the files here and explain what this project does"
 - [x] `kill -9` 후 재개 시 미완 tool call이 합성 결과로 닫힘
       (`rivet-cli/tests/e2e.rs::a_killed_run_is_closed_with_a_synthetic_result_and_resumes`
       — 실제 SIGKILL)
-
-[^live]: 이 환경에 API 키가 없어 실제 왕복을 **수행하지 못했다.** 충족했다고 표시하지
-    않는다. 오프라인 대체물은 (a) 실제 `reqwest` 경로를 지나는 루프백 SSE 서버 테스트,
-    (b) 11개 픽스처 디코드 테스트, (c) 서브프로세스 e2e다. 수동 검증 절차는
-    `HANDOFF.md`에 있다.
 
 ---
 
@@ -360,7 +358,7 @@ rivet job list
 | Phase | 상태 | 게이트 |
 |---|---|---|
 | 0 Repository | ✅ 완료 | 135 passed · clippy 0 · 리뷰 2회전 반영 완료 |
-| 1 Minimal Agent | ✅ 완료 (1건 수동 검증 대기) | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 중 7개 충족, 1번(실제 provider 왕복)은 API 키 부재로 미검증 · build 리뷰 지적 11건 반영 |
+| 1 Minimal Agent | ✅ 완료 | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 전부 충족 (1번은 실제 provider 수동 검증) · build 리뷰 지적 11건 반영 |
 | 2 Plugin | ⬜ | 롤백 무결성 |
 | 3 Event | ⬜ | TUI가 런타임 타입 미참조 |
 | 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |

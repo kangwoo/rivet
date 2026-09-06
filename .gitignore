@@ -1,4 +1,5 @@
 /target
+/rivet.toml
 **/*.rs.bk
 .DS_Store
 .env

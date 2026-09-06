@@ -13,10 +13,8 @@ Plugin · Model · Tool · ContextProvider · Policy · Sandbox
 Session · Agent · Workflow · Job · Scheduler · Evaluator
 ```
 
-> 상태: Phase 1 완료 — **실제로 도는 에이전트**. OpenAI 호환 프로토콜로 왕복하고,
-> 파일을 읽고 쓰고, 세션을 append-only 로그에 fsync하며, Ctrl-C와 `kill -9` 뒤에도
-> 재개된다. 단 왕복은 **녹화된 SSE 픽스처와 loopback 서버로만 검증**했다 — 실제 provider를
-> 상대로는 아직 돌려보지 않았다 ([`docs/plan.md`](./docs/plan.md)의 Phase 1 DoD 1).
+> 상태: Phase 1 완료 — **실제로 도는 에이전트**. 실제 provider와 왕복하고, 파일을 읽고
+> 쓰고, 세션을 append-only 로그에 fsync하며, Ctrl-C와 `kill -9` 뒤에도 재개된다.
 > 다음은 Phase 2(plugin 로더). 설계 문서는 [`docs/`](./docs)에 있다.
 
 ---
