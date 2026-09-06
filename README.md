@@ -162,4 +162,4 @@ Phase 0 산출물은 독립 에이전트의 적대적 설계 리뷰를 **두 번
 
 ## 라이선스
 
-Apache-2.0 OR MIT
+Apache-2.0 OR MIT — [LICENSE-APACHE](./LICENSE-APACHE), [LICENSE-MIT](./LICENSE-MIT)
