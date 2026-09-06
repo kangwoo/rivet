@@ -374,7 +374,7 @@ rivet job list
 |---|---|---|
 | 0 Repository | ✅ 완료 | 135 passed · clippy 0 · 리뷰 2회전 반영 완료 |
 | 1 Minimal Agent | ✅ 완료 | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 전부 충족 (1번은 실제 provider 수동 검증) · build 리뷰 지적 11건 반영 |
-| 2 Plugin | ✅ 완료 | 448 passed (+63) · clippy 0 · `cargo doc` 0 · DoD 5개 전부 충족 · 롤백 무결성(`Err`·패닉 양쪽) 테스트로 확인 |
+| 2 Plugin | ✅ 완료 | 448 passed (+63) · clippy 0 · `cargo doc` 0 · DoD 5개 전부 충족 · 롤백 무결성(`Err`·패닉 양쪽) 테스트로 확인 · 설계 [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) |
 | 3 Event | ⬜ | TUI가 런타임 타입 미참조 |
 | 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |
 | 5 Job Runtime | ⬜ | Demo 무개입 완주 |
