@@ -92,7 +92,7 @@ major `0`은 Cargo와 같이 **모든 minor 변경을 breaking으로** 취급한
 ### 2.3 선언하지 않은 슬롯에는 등록할 수 없다
 
 `capabilities`에 없는 슬롯에 `register_*`를 부르면 로더가 그 호출을 거부하고, 그 plugin의
-load 전체가 롤백된다. `Interceptor`에는 대응하는 `CapabilityKind`가 없으므로
+load 전체가 롤백된다. 선언한 슬롯이라도 **`load` 밖에서는** 등록할 수 없다(§4.1). `Interceptor`에는 대응하는 `CapabilityKind`가 없으므로
 `capabilities = ["policy"]`로 선언한다 — 둘 다 "이 tool call이 진행돼도 되는가"에
 답하는 자리다.
 
@@ -210,6 +210,20 @@ async fn load(&self, ctx: PluginContext) -> Result<PluginHandle> {
 않는다. 이벤트 구독 태스크는 런타임이 소유자별로 추적해 언로드 시 abort하지만, plugin이
 직접 띄운 태스크는 plugin 책임이다.
 
+**등록은 `load` 안에서만 할 수 있다.** 로더는 `load`가 반환된 직후 등록 창구를 닫고,
+`unload`를 부르기 전에 한 번 더 닫는다. 닫힌 뒤의 `register_*`는 plugin 이름을 담은
+`Err`로 실패하고 `warn` 로그를 남긴다 — `load`가 띄운 태스크가 나중에 부르는 것도,
+`unload` 안에서 부르는 것도 같다. 연결이 선 다음에 등록하고 싶다면 그 연결을 `load`
+안에서 기다려야 한다.
+
+이유는 회계다. 실패한 load의 롤백은 `unregister_all(instance_id)` **한 번**이고, 그
+뒤에 도착한 등록은 이미 죽은 인스턴스 id가 소유하게 된다 — 어떤 `unload`도 그것을
+언급하지 않고, `rivet doctor`와 `rivet plugin list`는 `record.registered`를 읽으므로 그
+존재를 볼 수도 없다. 프로세스 안의 무엇으로도 지울 수 없는 capability가 남는다는 뜻이다.
+`unload` 쪽도 같은 사고다: 로더는 `unregister_all`을 먼저 돌리고 그 다음에
+`Plugin::unload`를 부르므로, teardown 중의 등록은 정리를 지나쳐 살아남아 **자기 자신의
+재로드를 영구히 막는다.**
+
 ### 4.2 권한은 넓힐 수 없다
 
 ```text
@@ -223,10 +237,10 @@ plugin이 정한다.
 
 ```rust
 // (1) 크게 실패한다 -- 그 권한 없이는 이 plugin이 할 일이 없을 때.
-//     `rivet.model-openai`가 network_http에 대해 이렇게 한다.
-if !ctx.permissions.contains(&Permission::ProcessSpawn) {
+//     `rivet.model-openai`가 network_http에 대해 실제로 하는 것이 이쪽이다.
+if !ctx.permissions.granted().iter().any(|p| matches!(p, Permission::NetworkHttp(_))) {
     return Err(Error::plugin(
-        "rivet.tool-shell requires process_spawn; the active profile denies it"
+        "`rivet.model-openai` needs `network_http`, and the active profile grants none"
     ));
 }
 
@@ -236,6 +250,34 @@ if ctx.permissions.allows(&Permission::FsWrite(FsScope::Workspace)) {
     ctx.registry.register_tool(Arc::new(WriteFile)).await?;
 }
 ```
+
+> **⚠ 어느 프로파일도 주지 않는 permission이 넷 있다** — `process_spawn`, `secrets_read`,
+> `events_subscribe`, `job_manage`. `Profile::permissions()`가 주는 것은
+> `fs_read(workspace)` · `session_read` · `session_write` · `events_publish` ·
+> `network_http`, 그리고 쓰기 가능한 프로파일의 `fs_write(workspace)`뿐이다.
+>
+> Phase 2부터 교집합이 실제로 계산되므로, 이 넷 중 하나를 매니페스트에 적은 plugin은
+> **모든 프로파일에서** 그 권한이 0개가 된다. 그 위에 관용구 (1)을 얹으면 그 plugin은
+> 어디서도 로드되지 않는다 — `developer`에서도. (이 문단의 예시가 원래
+> `rivet.tool-shell` + `process_spawn`이었던 이유이고, 그래서 실제로 동작하는
+> `rivet.model-openai`로 바꿨다.) 매니페스트 파서가 `secrets_read`에 비어 있지 않은 키
+> 목록을 요구하는 것은 **어휘가** 완성돼 있다는 뜻이지 프로파일이 그것을 준다는 뜻이
+> 아니다.
+>
+> 지금 그런 슬롯이 필요하면 관용구 (2)로 축소 등록하는 수밖에 없다. 프로파일이 그
+> 권한을 주도록 바꾸는 것은 정리가 아니라 **보안 결정**이라 열어 두었다 —
+> [`security.md`](./security.md) §8 표의 각주와 [`architecture.md`](./architecture.md)
+> §11-10.
+
+**`fs_read`의 scope는 Phase 2에서 아무것도 좁히지 않는다.** `tool-filesystem`은
+`write_file`만 grant로 게이트하고 `read_file`·`list_dir`·`search`는 무조건 등록한다. 이
+읽기 도구들을 워크스페이스 안에 가두는 것은 grant가 아니라 `Workspace::resolve`와
+런타임의 fsguard다. 그래서 `fs_read({ subtree = "docs" })`를 선언한 매니페스트도
+워크스페이스 전체를 읽는 `read_file`을 받고, `rivet plugin show`는 그것을 `granted`로
+출력한다. 즉 **읽기 scope는 지금 선언이지 강제가 아니다.** 도구별 경로 범위를 실제로
+좁히는 것은 Phase 4의 sandbox이고, 파서가 탈출 서브트리를 지금 거부하는 것은 그 강제가
+붙는 시점에 어휘가 이미 정확하도록 하기 위해서다. 쓰기 쪽(`fs_write`)은 DoD 3이며 지금도
+진짜다.
 
 ### 4.3 `Err` 와 `is_error` 를 구분한다
 
@@ -421,6 +463,11 @@ DISCOVERED → VALIDATED → LOADED → ACTIVE → UNLOADING → UNLOADED
 `load()`가 **패닉**해도 `Err`와 같은 길을 간다: 등록이 되돌려지고, 그 인스턴스의
 취소 토큰이 취소되고, 기록은 `FAILED`가 된다. (plugin이 직접 띄운 태스크 안의 패닉은
 잡히지 않는다.)
+
+**등록 창구는 `load`와 함께 닫힌다.** `load`가 반환되면 — 성공이든 실패든 — 로더가 그
+plugin의 guard를 봉인하고, `Plugin::unload`를 부르기 전에 다시 봉인한다. 그래서 실패한
+load가 남긴 태스크의 뒤늦은 등록도, `unload` 안의 등록도 거부된다. 롤백이 한 시점의
+청소가 아니라 봉인이라는 뜻이다(§4.1).
 
 ---
 

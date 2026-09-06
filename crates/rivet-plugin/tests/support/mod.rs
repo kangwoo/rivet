@@ -33,6 +33,13 @@ pub enum After {
     Panic,
     /// Register a policy the manifest never declared, to trip the guard.
     RegisterUndeclaredPolicy,
+    /// Hand a spawned task the registry, return `Err`, and let the task register *after*
+    /// `load` has returned and the loader has rolled the instance back. This is the shape
+    /// of "register once the connection is up", which is how a plugin with a backend
+    /// naturally wants to be written.
+    FailAfterArmingALateRegistration,
+    /// Register a tool from `unload`, after the loader's `unregister_all` has run.
+    RegisterFromUnload,
 }
 
 /// One plugin's script, and what it recorded.
@@ -44,9 +51,27 @@ pub struct Spy {
     pub entered: AtomicBool,
     pub unloads: AtomicUsize,
     token: Mutex<Option<CancellationToken>>,
+    /// What a registration attempted *outside* `load` came back with. `None` until the
+    /// attempt is made; the error text rather than the `Error` so the spy stays `Sync`
+    /// and a test can assert on the message.
+    late: Mutex<Option<Result<(), String>>>,
 }
 
 impl Spy {
+    /// The outcome of the registration this plugin made outside `load`, if it has been
+    /// made yet.
+    pub fn late_outcome(&self) -> Option<Result<(), String>> {
+        self.late
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record_late(&self, outcome: rivet_core::Result<()>) {
+        *self.late.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(outcome.map_err(|error| error.to_string()));
+    }
+
     /// Whether the token this instance was handed has been cancelled.
     pub fn token_cancelled(&self) -> bool {
         self.token
@@ -68,6 +93,7 @@ pub fn plan(id: &str, tools: &[&str], after: After) -> Arc<Spy> {
         entered: AtomicBool::new(false),
         unloads: AtomicUsize::new(0),
         token: Mutex::new(None),
+        late: Mutex::new(None),
     });
     SCRIPTS
         .lock()
@@ -153,6 +179,20 @@ pub fn null_config() -> serde_json::Value {
     serde_json::Value::Null
 }
 
+/// Wait for a registration made outside `load` to land, and report what it came back with.
+///
+/// The attempt is on another task by construction, so a test cannot assert on it
+/// synchronously.
+pub async fn late_outcome(spy: &Spy) -> Result<(), String> {
+    for _ in 0..200 {
+        if let Some(outcome) = spy.late_outcome() {
+            return outcome;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the plugin never attempted its late registration");
+}
+
 // --- the capabilities they register --------------------------------------------------------
 
 #[derive(Debug)]
@@ -221,7 +261,8 @@ impl Plugin for ScriptedPlugin {
         }
 
         match self.spy.after {
-            After::Succeed => Ok(PluginHandle::new(registered)),
+            // `RegisterFromUnload` is an ordinary load; it does its damage in `unload`.
+            After::Succeed | After::RegisterFromUnload => Ok(PluginHandle::new(registered)),
             After::Fail => Err(Error::plugin("this plugin fails after registering")),
             After::Panic => panic!("this plugin panics after registering"),
             After::RegisterUndeclaredPolicy => {
@@ -231,11 +272,37 @@ impl Plugin for ScriptedPlugin {
                 registered.push("policy:sneaky".to_string());
                 Ok(PluginHandle::new(registered))
             }
+            After::FailAfterArmingALateRegistration => {
+                // Deliberately does *not* select on `ctx.shutdown`: a plugin that ignores
+                // its token is exactly the one the host cannot afford to trust.
+                let registry = ctx.registry.clone();
+                let spy = self.spy.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    spy.record_late(
+                        registry
+                            .register_tool(Arc::new(NamedTool("late_tool".to_string())))
+                            .await,
+                    );
+                });
+                Err(Error::plugin(
+                    "this plugin fails after arming a late registration",
+                ))
+            }
         }
     }
 
-    async fn unload(&self, _ctx: PluginContext) -> rivet_core::Result<()> {
+    async fn unload(&self, ctx: PluginContext) -> rivet_core::Result<()> {
         self.spy.unloads.fetch_add(1, Ordering::SeqCst);
+        if self.spy.after == After::RegisterFromUnload {
+            // And swallows the result, which is the case that matters: a host cannot rely
+            // on a plugin propagating an error out of its own teardown.
+            self.spy.record_late(
+                ctx.registry
+                    .register_tool(Arc::new(NamedTool("t".to_string())))
+                    .await,
+            );
+        }
         Ok(())
     }
 }

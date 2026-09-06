@@ -392,6 +392,20 @@ rivet --profile readonly "왜 이 테스트가 실패하지?"
 > `production`의 "허용 목록"도 마찬가지다. 프로파일이 provider 호출만 따로 금지할 수
 > 있으려면 어휘에 별도 permission이 필요하고, 그것은 `rivet-core` 계약 변경이다.
 
+> **⚠ `process` 열은 어느 프로파일에서도 *주어지지* 않는다.** `Profile::permissions()`는
+> `ProcessSpawn`을 아무에게도 주지 않는다 — `developer`의 `✓`와 `ci`의 `✓`를 포함해서다.
+> Phase 2부터 `manifest ∩ profile`이 실효를 갖기 시작했으므로, `process_spawn`을 선언한
+> plugin은 **모든 프로파일에서** 그 권한이 빈 채로 로드된다. `network` 열이 반대 방향으로
+> 정직하지 않다면(주긴 주는데 강제하지 않는다), 이 열은 이쪽 방향으로 정직하지 않다:
+> 표가 약속하는 것을 아무도 주지 않는다.
+>
+> 같은 이유로 `SecretsRead` · `EventsSubscribe` · `JobManage`도 주는 프로파일이 없다.
+> 넷 다 어휘에는 있고 매니페스트에 적을 수 있으며 — `secrets_read`는 파서가 비어 있지
+> 않은 키 목록까지 요구한다 — 교집합에서 전부 사라진다. 표의 이 칸들은 **그렇게 되어야
+> 한다**는 진술이지 지금의 상태가 아니다. 어느 프로파일이 무엇을 주는지 정하는 것은
+> 정리가 아니라 보안 결정이므로, 요청자가 생기는 Phase(구독은 3, 시크릿·프로세스는 4)
+> 착수 시점에 명시적으로 연다. [`architecture.md`](./architecture.md) §11-10.
+
 ---
 
 ## 9. 운영자 체크리스트

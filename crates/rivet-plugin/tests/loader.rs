@@ -264,6 +264,100 @@ async fn registering_into_an_undeclared_slot_is_refused_and_rolled_back() {
 }
 
 #[tokio::test]
+async fn a_registration_from_a_task_outliving_a_failed_load_is_refused() {
+    // The rollback has to be a seal, not a sweep. `PluginContext` is `Clone` and its
+    // registry is an `Arc`, so a plugin that armed a task before failing still holds a
+    // live registration handle after `unregister_all` has run. A capability that lands
+    // then is owned by a dead instance id: no `unload` will ever mention it, and neither
+    // `rivet doctor` nor `rivet plugin list` can see it, because both read
+    // `record.registered`.
+    let src = tool_source(
+        "late",
+        "test.late",
+        &["gone"],
+        After::FailAfterArmingALateRegistration,
+    );
+    let spy = support::plan(
+        "test.late",
+        &["gone"],
+        After::FailAfterArmingALateRegistration,
+    );
+    let (mut loader, registry, _bus) = loader(no_grant());
+    loader.discover(&[src]).unwrap();
+    loader.validate();
+
+    loader
+        .load(&id("test.late"), null_config())
+        .await
+        .unwrap_err();
+    assert!(registry.tool_names().await.is_empty(), "the rollback ran");
+
+    let refusal = support::late_outcome(&spy)
+        .await
+        .expect_err("registering after the load window closed must fail, and loudly");
+    assert!(
+        refusal.contains("test.late"),
+        "the error names the plugin: {refusal}"
+    );
+    assert!(
+        refusal.contains("load"),
+        "and says when the window was open: {refusal}"
+    );
+
+    assert!(
+        registry.tool_names().await.is_empty(),
+        "nothing may appear after the rollback: it would be unremovable"
+    );
+    let record = loader.record(&id("test.late")).unwrap();
+    assert_eq!(record.state, PluginState::Failed);
+    assert!(record.registered.is_empty(), "{:?}", record.registered);
+    loader.unload_all().await;
+    assert!(registry.tool_names().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_plugin_that_registers_from_unload_does_not_break_its_own_reload() {
+    // `unload` runs *after* `unregister_all`, so a registration made there would survive
+    // the teardown and hold the name against the next load -- DoD 5 defeated by the
+    // plugin's own teardown, with the record reporting `UNLOADED` and no registrations
+    // the whole time.
+    let src = tool_source(
+        "on-unload",
+        "test.on-unload",
+        &["t"],
+        After::RegisterFromUnload,
+    );
+    let spy = support::plan("test.on-unload", &["t"], After::RegisterFromUnload);
+    let (mut loader, registry, _bus) = loader(no_grant());
+    loader.discover(&[src]).unwrap();
+    loader.validate();
+    loader
+        .load(&id("test.on-unload"), null_config())
+        .await
+        .unwrap();
+
+    loader.unload(&id("test.on-unload")).await.unwrap();
+    let refusal = spy
+        .late_outcome()
+        .expect("unload ran and attempted its registration")
+        .expect_err("the window is closed before `unload` is called");
+    assert!(
+        refusal.contains("test.on-unload"),
+        "the error names the plugin: {refusal}"
+    );
+    assert!(
+        registry.tool_names().await.is_empty(),
+        "otherwise the name is held by an instance that no longer exists"
+    );
+
+    loader
+        .load(&id("test.on-unload"), null_config())
+        .await
+        .expect("re-registration after unload must succeed");
+    assert_eq!(registry.tool_names().await, ["t"]);
+}
+
+#[tokio::test]
 async fn what_a_plugin_claims_is_checked_against_what_it_registered() {
     // The handle is a claim; the guard's list is the fact.
     let src = tool_source("claims", "test.claims", &["a", "b"], After::Succeed);
@@ -353,6 +447,41 @@ async fn a_batch_becomes_active_only_when_every_plugin_loaded() {
         loader.record(&id("test.batch-ok")).unwrap().state,
         PluginState::Loaded,
         "left at LOADED, visibly one the host is about to tear down"
+    );
+}
+
+#[tokio::test]
+async fn a_second_batch_does_not_promote_the_records_of_the_first() {
+    // `ACTIVE` means "the host accepted the whole batch", and a record left at `LOADED`
+    // means "the host is about to tear this down". A sweep over every record makes both
+    // false for the first batch the moment a second one succeeds.
+    let ok = tool_source("two-a", "test.two-a", &["a2"], After::Succeed);
+    let broken = tool_source("two-b", "test.two-b", &["b2"], After::Fail);
+    let later = tool_source("two-c", "test.two-c", &["c2"], After::Succeed);
+    let (mut loader, _registry, _bus) = loader(no_grant());
+    loader.discover(&[ok, broken, later]).unwrap();
+    loader.validate();
+
+    let first = loader
+        .load_selected(&[id("test.two-a"), id("test.two-b")], &no_config)
+        .await;
+    assert_eq!(first.failed.len(), 1);
+    assert_eq!(
+        loader.record(&id("test.two-a")).unwrap().state,
+        PluginState::Loaded
+    );
+
+    let second = loader.load_selected(&[id("test.two-c")], &no_config).await;
+    assert!(second.failed.is_empty(), "{:?}", second.failed);
+    assert_eq!(
+        loader.record(&id("test.two-c")).unwrap().state,
+        PluginState::Active,
+        "this batch committed"
+    );
+    assert_eq!(
+        loader.record(&id("test.two-a")).unwrap().state,
+        PluginState::Loaded,
+        "and the batch that did not stays where the host left it"
     );
 }
 

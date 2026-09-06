@@ -187,7 +187,11 @@ rivet plugin show rivet.tool-filesystem
 
 - [x] 부분 등록 후 실패한 plugin이 **아무것도** 남기지 않음 (테스트)
       — `a_plugin_that_fails_after_registering_leaves_nothing`,
-      `a_plugin_that_panics_after_registering_leaves_nothing`
+      `a_plugin_that_panics_after_registering_leaves_nothing`,
+      `a_registration_from_a_task_outliving_a_failed_load_is_refused` (롤백은 한 시점의
+      청소가 아니라 봉인이다 — plugin이 계속 들고 있는 guard로 나중에 등록하는 것도
+      거부된다. 그게 아니면 "아무것도"는 "`load` 안에서 동기적으로 등록한 것은
+      아무것도"라는 뜻이 된다)
 - [x] ABI 불일치 plugin이 등록 시도 전에 거부됨
       — `an_incompatible_abi_is_rejected_before_load_is_called` (spy가 `load` 진입을
       기록하고, 그 플래그가 false임을 확인한다)
@@ -197,7 +201,9 @@ rivet plugin show rivet.tool-filesystem
       `a_readonly_profile_leaves_write_file_unregistered` (e2e)
 - [x] 이름 충돌 시 양쪽 plugin 이름이 에러에 나옴 — `a_name_collision_names_both_plugins`
 - [x] unload 후 같은 이름 재등록 성공 (hot reload 전제)
-      — `a_plugin_reloads_under_the_same_name`
+      — `a_plugin_reloads_under_the_same_name`,
+      `a_plugin_that_registers_from_unload_does_not_break_its_own_reload` (plugin 자신의
+      teardown이 이름을 다시 잡아 재로드를 막지 못한다)
 
 미검증으로 남긴 것: `Plugin::load`/`unload`가 **매달리는** 경우에 타임아웃이 없다.
 in-process plugin 셋은 모두 신뢰 대상이라 위험이 낮지만, 강제되는 것은 없다.
@@ -374,7 +380,7 @@ rivet job list
 |---|---|---|
 | 0 Repository | ✅ 완료 | 135 passed · clippy 0 · 리뷰 2회전 반영 완료 |
 | 1 Minimal Agent | ✅ 완료 | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 전부 충족 (1번은 실제 provider 수동 검증) · build 리뷰 지적 11건 반영 |
-| 2 Plugin | ✅ 완료 | 448 passed (+63) · clippy 0 · `cargo doc` 0 · DoD 5개 전부 충족 · 롤백 무결성(`Err`·패닉 양쪽) 테스트로 확인 · 설계 [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) |
+| 2 Plugin | ✅ 완료 | 453 passed (+68) · clippy 0 · `cargo doc` 0 · DoD 5개 전부 충족 · 롤백 무결성(`Err`·패닉·`load` 이후의 뒤늦은 등록) 테스트로 확인 · 설계 [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) · 리뷰 2라운드 지적 반영(등록 창구 봉인 · 배치 승격 범위 · `plugin show`의 ABI 거부 표시) |
 | 3 Event | ⬜ | TUI가 런타임 타입 미참조 |
 | 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |
 | 5 Job Runtime | ⬜ | Demo 무개입 완주 |

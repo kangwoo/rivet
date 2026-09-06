@@ -72,6 +72,9 @@ pub struct LoadReport {
 struct Instance {
     plugin: Arc<dyn Plugin>,
     ctx: PluginContext,
+    /// The same guard `ctx.registry` holds, typed, so `unload` can close the registration
+    /// window before handing the plugin its teardown.
+    guard: Arc<GuardedRegistry>,
     /// A child of the loader's root token, so unloading one plugin does not stop another
     /// plugin's background work.
     token: CancellationToken,
@@ -240,6 +243,12 @@ impl PluginLoader {
             ))),
         };
 
+        // Registration ends with `load`, on both paths. The plugin keeps a live handle to
+        // the guard afterwards, so without this the rollback below is a sweep it can
+        // register straight past — into an instance id no `unload` will ever mention, and
+        // into a capability list `observed()` has already been read from.
+        guard.seal().await;
+
         match result {
             Ok(handle) => {
                 let registered = guard.observed();
@@ -251,8 +260,15 @@ impl PluginLoader {
                     record.claimed = handle.registered;
                     record.error = None;
                 }
-                self.instances
-                    .insert(id.clone(), Instance { plugin, ctx, token });
+                self.instances.insert(
+                    id.clone(),
+                    Instance {
+                        plugin,
+                        ctx,
+                        guard,
+                        token,
+                    },
+                );
                 self.publish(PluginEvent::Loaded {
                     plugin_id: id.clone(),
                     capabilities: registered,
@@ -314,8 +330,12 @@ impl PluginLoader {
         }
 
         if report.failed.is_empty() {
+            // This batch's records and no others. A record an *earlier* batch left at
+            // `LOADED` is one the host is about to tear down; promoting it here would
+            // erase the only sign of that, and `ACTIVE` would stop meaning "the host
+            // accepted the whole batch".
             for record in &mut self.records {
-                if record.state == PluginState::Loaded {
+                if record.state == PluginState::Loaded && report.loaded.contains(&record.id) {
                     record.state = PluginState::Active;
                 }
             }
@@ -336,6 +356,11 @@ impl PluginLoader {
         };
         self.set_state(id, PluginState::Unloading);
         self.registry.unregister_all(instance.ctx.instance_id).await;
+        // Sealed since `load` returned; re-asserted here because this is the ordering that
+        // matters. `unregister_all` has just run, so a registration made from inside
+        // `unload` would outlive it and hold the name against the next load — DoD 5
+        // defeated by the plugin's own teardown.
+        instance.guard.seal().await;
         instance.token.cancel();
         let result = instance.plugin.unload(instance.ctx.clone()).await;
 
@@ -352,7 +377,12 @@ impl PluginLoader {
         result
     }
 
-    /// Unload everything, in reverse load order. Errors are reported, not propagated.
+    /// Unload everything, in reverse *discovery* order — records are kept in the order
+    /// `discover` saw them, which is not the order `load_selected` was given. Nothing
+    /// depends on teardown order; the comment is precise because the difference is
+    /// invisible until a plugin's `unload` has a side effect another plugin can see.
+    ///
+    /// Errors are reported, not propagated.
     pub async fn unload_all(&mut self) {
         let ids: Vec<PluginId> = self
             .records

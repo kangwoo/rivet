@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use rivet_core::capability::{FsScope, Permission};
 use rivet_core::error::Error;
 use rivet_core::id::PluginId;
+use rivet_core::plugin::PluginState;
 use rivet_plugin::PluginRecord;
 use rivet_plugin::loader::state_label;
 
@@ -187,6 +188,9 @@ fn capabilities(record: &PluginRecord) -> String {
 
 /// What the profile did to one requested permission.
 fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
+    if !permissions_were_computed(record) {
+        return "not evaluated (this plugin never passed validation)".to_string();
+    }
     if record.denied.contains(wanted) {
         format!("removed by profile `{profile}`")
     } else if record.effective.contains(wanted) {
@@ -195,6 +199,17 @@ fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
         // Met, but not to what was asked for: the profile capped a wider request.
         format!("narrowed by profile `{profile}`")
     }
+}
+
+/// Whether `validate` got as far as computing `effective` and `denied` for this record.
+///
+/// It computes them only after the ABI check passes, so on a rejected record both are
+/// empty — and [`effect`]'s fall-through would read that emptiness as "the profile capped
+/// a wider request", naming a profile that never got a say. The ABI is the only thing
+/// `validate` rejects, and a record it has not reached yet is still `DISCOVERED`.
+fn permissions_were_computed(record: &PluginRecord) -> bool {
+    record.state != PluginState::Discovered
+        && record.manifest.is_compatible_with(rivet_core::ABI_VERSION)
 }
 
 /// A permission as a manifest would spell it, with its scope.
@@ -254,6 +269,10 @@ fn io(path: &Path, error: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use rivet_core::capability::{CapabilityVersion, PermissionSet};
+    use rivet_core::plugin::PluginManifest;
+    use rivet_plugin::Origin;
+
     use super::*;
 
     #[test]
@@ -261,6 +280,61 @@ mod tests {
         assert_eq!(pascal_case("tool-lint"), "ToolLint");
         assert_eq!(pascal_case("hello"), "Hello");
         assert_eq!(title_case("tool-lint"), "Tool lint");
+    }
+
+    /// A record for a plugin asking for `wanted`, as `validate` leaves it: `VALIDATED`,
+    /// with `effective` and `denied` computed.
+    fn record_asking_for(wanted: Vec<Permission>) -> PluginRecord {
+        let id = PluginId::new("test.asker").unwrap();
+        let manifest =
+            PluginManifest::new(id.clone(), "Asker", "0.1.0").with_permissions(wanted.clone());
+        PluginRecord {
+            id,
+            manifest,
+            origin: Origin::Builtin {
+                crate_name: "test-asker",
+            },
+            state: PluginState::Validated,
+            instance_id: None,
+            effective: PermissionSet::new(wanted),
+            denied: Vec::new(),
+            registered: Vec::new(),
+            claimed: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn an_abi_rejected_plugin_does_not_blame_the_profile() {
+        // `validate` rejects on the ABI *before* it computes `effective`/`denied`, so both
+        // are empty on this record and every permission would otherwise fall through to
+        // "narrowed by profile `developer`" -- naming a profile that did nothing. The ABI
+        // line `show` prints above this one already said why.
+        let mut record = record_asking_for(vec![Permission::FsRead(FsScope::Workspace)]);
+        record.manifest.abi_version = CapabilityVersion::new(0, 99);
+        record.state = PluginState::Failed;
+        record.effective = PermissionSet::empty();
+        assert!(!record.manifest.is_compatible_with(rivet_core::ABI_VERSION));
+
+        let said = effect(
+            &record,
+            &Permission::FsRead(FsScope::Workspace),
+            "developer",
+        );
+        assert!(!said.contains("developer"), "{said}");
+        assert!(said.contains("not evaluated"), "{said}");
+    }
+
+    #[test]
+    fn a_profile_that_capped_a_request_is_named() {
+        // The other side of that branch: here the profile really is the reason. Asked for
+        // `anywhere`, met down to the workspace -- neither denied outright nor granted as
+        // asked, which is the one `effect` arm no test used to reach.
+        let mut record = record_asking_for(vec![Permission::FsRead(FsScope::Anywhere)]);
+        record.effective = PermissionSet::new([Permission::FsRead(FsScope::Workspace)]);
+
+        let said = effect(&record, &Permission::FsRead(FsScope::Anywhere), "developer");
+        assert_eq!(said, "narrowed by profile `developer`");
     }
 
     #[test]
