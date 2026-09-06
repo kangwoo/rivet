@@ -280,7 +280,13 @@ impl Workspace {
             .env(KEY_ENV, "not-a-real-key")
             .env("RUST_LOG", "warn")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // A test that panics drops its `Child` without waiting, and tokio does not
+            // kill on drop by default. The tests that park a run on a named pipe would
+            // then leave a `rivet` behind, blocked on a FIFO nobody will ever write to,
+            // reparented to init and outliving the run that spawned it. One such orphan
+            // survived a failing assertion here for half an hour before anyone noticed.
+            .kill_on_drop(true);
         command
     }
 
