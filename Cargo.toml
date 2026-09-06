@@ -10,6 +10,7 @@ members = [
     "crates/rivet-cli",
     "plugins/model-openai",
     "plugins/tool-filesystem",
+    "plugins/context-builtin",
     "plugins/tool-shell",
     "plugins/tool-git",
     "plugins/policy-default",
@@ -36,6 +37,7 @@ rivet-tui = { path = "crates/rivet-tui", version = "0.1.0" }
 
 rivet-model-openai = { path = "plugins/model-openai", version = "0.1.0" }
 rivet-tool-filesystem = { path = "plugins/tool-filesystem", version = "0.1.0" }
+rivet-context-builtin = { path = "plugins/context-builtin", version = "0.1.0" }
 rivet-tool-shell = { path = "plugins/tool-shell", version = "0.1.0" }
 rivet-tool-git = { path = "plugins/tool-git", version = "0.1.0" }
 rivet-policy-default = { path = "plugins/policy-default", version = "0.1.0" }

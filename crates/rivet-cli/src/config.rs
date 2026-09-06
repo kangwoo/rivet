@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use rivet_core::agent::RunLimits;
 use rivet_core::capability::{FsScope, Permission, PermissionSet};
 use rivet_core::error::Error;
+use rivet_core::id::PluginId;
 use rivet_core::model::ModelId;
 use rivet_core::workspace::Workspace;
 use serde::Deserialize;
@@ -27,28 +28,9 @@ pub const CONFIG_ENV: &str = "RIVET_CONFIG";
 /// Where sessions live, relative to the workspace root. Already in `.gitignore`.
 pub const SESSIONS_DIR: &str = ".rivet/sessions";
 
-/// Plugin ids Phase 1 can actually register.
-///
-/// `rivet.context-builtin` is not in `rivet.example.toml` because it is not optional: the
-/// loop cannot assemble a system prompt without it. Listing it is allowed and does
-/// nothing.
-pub const IMPLEMENTED_PLUGINS: [&str; 3] = [
-    "rivet.model-openai",
-    "rivet.tool-filesystem",
-    "rivet.context-builtin",
-];
-
-/// Plugin ids the shipped example enables that later phases provide.
-///
-/// A config copied from the example is the most likely first config a user has, so these
-/// warn and are skipped rather than failing the run. Phase 2's loader removes this
-/// middle category: everything then either loads or is a typo.
-pub const PLANNED_PLUGINS: [&str; 4] = [
-    "rivet.tool-shell",
-    "rivet.tool-git",
-    "rivet.policy-default",
-    "rivet.sandbox-local",
-];
+/// The key the host injects into every `[plugins."<id>"]` table, and therefore the one
+/// key a config file may not set there itself.
+pub const RESERVED_PLUGIN_KEY: &str = "agent";
 
 // --- the file ----------------------------------------------------------------------------
 
@@ -245,6 +227,14 @@ impl Profile {
             Permission::SessionRead,
             Permission::SessionWrite,
             Permission::EventsPublish,
+            // Every profile, including `readonly`. The vocabulary has one `NetworkHttp`
+            // shared by tool plugins and model plugins, so withholding it here would deny
+            // the provider call and leave no profile able to run an agent at all --
+            // including `rivet --profile readonly "왜 이 테스트가 실패하지?"`, which
+            // `docs/security.md` gives as its own example. Tool egress is not enforced by
+            // anything until Phase 4's sandbox; see the footnote on that document's
+            // profile table.
+            Permission::NetworkHttp(None),
         ];
         if self.writable() {
             granted.push(Permission::FsWrite(FsScope::Workspace));
@@ -266,6 +256,20 @@ impl Profile {
 }
 
 // --- the resolved configuration --------------------------------------------------------------
+
+/// What `[plugins].enabled` resolved to.
+///
+/// The distinction matters: an *absent* or *empty* list is not "load nothing", it is
+/// "load everything this build provides". That is what lets `rivet "explain this repo"`
+/// work in a directory with no `rivet.toml` at all, and the host resolves it against its
+/// catalog rather than against a constant here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginSelection {
+    /// No `enabled` key, or an empty one: every plugin in the host's catalog.
+    All,
+    /// Exactly these ids, deduplicated, in the order the file lists them.
+    Only(Vec<PluginId>),
+}
 
 /// Sections a config may declare that Phase 1 parses but does not act on.
 ///
@@ -290,10 +294,8 @@ pub struct Config {
     pub limits: RunLimits,
     pub profile: Profile,
     pub unattended: bool,
-    /// Implemented plugin ids to load, in a stable order.
-    pub plugins: Vec<String>,
-    /// Enabled ids a later phase will provide, reported once at startup.
-    pub deferred_plugins: Vec<String>,
+    /// Which plugins to load. Resolved against the host's catalog, not here.
+    pub plugins: PluginSelection,
     /// Per-plugin settings, as JSON, keyed by plugin id.
     pub plugin_settings: BTreeMap<String, serde_json::Value>,
     /// Configured sections that later phases will act on.
@@ -341,16 +343,27 @@ impl Config {
             .unwrap_or_else(|| file.policy.profile.clone());
         let profile = Profile::parse(&profile_name)?;
 
-        let (plugins, deferred_plugins) = classify_plugins(&file.plugins.enabled)?;
+        let plugins = selection(&file.plugins.enabled)?;
 
         let mut plugin_settings = BTreeMap::new();
         for (id, value) in file.plugins.settings {
             if id == "enabled" {
                 continue;
             }
+            // A malformed id as the *key* is fatal even when nothing enables it: it can
+            // never match a plugin, so it is a typo rather than a table someone left
+            // behind. (One that is merely not enabled is reported by `rivet doctor`.)
+            PluginId::new(id.clone())
+                .map_err(|e| Error::invalid_argument(format!("in `[plugins]`: {}", e.message())))?;
             let json = serde_json::to_value(&value).map_err(|e| {
                 Error::invalid_argument(format!("`[plugins.\"{id}\"]` is not valid")).with_cause(e)
             })?;
+            if json.get(RESERVED_PLUGIN_KEY).is_some() {
+                return Err(Error::invalid_argument(format!(
+                    "`[plugins.\"{id}\"]` sets `{RESERVED_PLUGIN_KEY}`, which the host \
+                     injects into every plugin's config; rename the key"
+                )));
+            }
             plugin_settings.insert(id, json);
         }
 
@@ -374,7 +387,6 @@ impl Config {
             // where `PolicyRequest.unattended` will read it, and `rivet doctor` shows it.
             unattended: overrides.headless || profile.implies_unattended(),
             plugins,
-            deferred_plugins,
             plugin_settings,
             workspace,
             sessions_dir,
@@ -382,20 +394,40 @@ impl Config {
         })
     }
 
-    /// The settings table for one plugin, as JSON.
+    /// The config one plugin receives: its own `[plugins."<id>"]` table, plus the `agent`
+    /// object the host injects into every plugin's table uniformly.
+    ///
+    /// The injection is what lets `PluginSource::construct` take no arguments: the model
+    /// plugin reads `agent.model` and the context plugin reads `agent.instructions`
+    /// without the host keeping a per-id mapping — and it is the same shape that survives
+    /// a process boundary in Phase 6. `agent` is reserved inside a plugin table for
+    /// exactly this reason; a config that sets it fails at startup.
     #[must_use]
-    pub fn settings_for(&self, plugin_id: &str) -> serde_json::Value {
-        self.plugin_settings
-            .get(plugin_id)
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)
+    pub fn plugin_config(&self, plugin_id: &PluginId) -> serde_json::Value {
+        let mut table = match self.plugin_settings.get(plugin_id.as_str()) {
+            Some(serde_json::Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        table.insert(
+            RESERVED_PLUGIN_KEY.to_string(),
+            serde_json::json!({
+                "model": self.model.as_str(),
+                "instructions": self.instructions,
+            }),
+        );
+        serde_json::Value::Object(table)
     }
 
     /// The environment variable the model plugin expects to hold its key.
+    ///
+    /// The one hardcoded plugin id left in the host after Phase 2. It buys a credential
+    /// check before a session exists, and therefore a better error than the plugin's own
+    /// check at load — which still runs. Named as debt in `docs/config.md`.
     #[must_use]
     pub fn api_key_env(&self) -> String {
-        self.settings_for("rivet.model-openai")
-            .get("api_key_env")
+        self.plugin_settings
+            .get("rivet.model-openai")
+            .and_then(|table| table.get("api_key_env"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("OPENAI_API_KEY")
             .to_string()
@@ -465,44 +497,24 @@ fn read(path: &Path) -> rivet_core::Result<FileConfig> {
     })
 }
 
-/// Split enabled plugin ids into what loads now, what waits for a later phase, and typos.
-fn classify_plugins(enabled: &[String]) -> rivet_core::Result<(Vec<String>, Vec<String>)> {
-    let mut load = Vec::new();
-    let mut deferred = Vec::new();
-
+/// Turn `[plugins].enabled` into a selection, validating the shape of every id.
+///
+/// Membership is *not* checked here: which ids exist is a property of the host's catalog,
+/// and the host reports an id it cannot provide by listing the ones it can.
+fn selection(enabled: &[String]) -> rivet_core::Result<PluginSelection> {
     if enabled.is_empty() {
-        return Ok((
-            IMPLEMENTED_PLUGINS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-            deferred,
-        ));
+        return Ok(PluginSelection::All);
     }
-
-    for id in enabled {
-        if IMPLEMENTED_PLUGINS.contains(&id.as_str()) {
-            if !load.contains(id) {
-                load.push(id.clone());
-            }
-        } else if PLANNED_PLUGINS.contains(&id.as_str()) {
-            deferred.push(id.clone());
-        } else {
-            return Err(Error::invalid_argument(format!(
-                "unknown plugin id `{id}` in `[plugins].enabled`. \
-                 Available now: {}. Planned: {}.",
-                IMPLEMENTED_PLUGINS.join(", "),
-                PLANNED_PLUGINS.join(", ")
-            )));
+    let mut ids = Vec::with_capacity(enabled.len());
+    for raw in enabled {
+        let id = PluginId::new(raw.clone()).map_err(|e| {
+            Error::invalid_argument(format!("in `[plugins].enabled`: {}", e.message()))
+        })?;
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
-
-    // Context providers are not optional: without them there is no system prompt.
-    let builtin = "rivet.context-builtin".to_string();
-    if !load.contains(&builtin) {
-        load.push(builtin);
-    }
-    Ok((load, deferred))
+    Ok(PluginSelection::Only(ids))
 }
 
 #[cfg(test)]
@@ -533,22 +545,11 @@ mod tests {
         assert!(config.workspace.resolve(Path::new(".env")).is_err());
         assert_eq!(config.api_key_env(), "DEEPSEEK_API_KEY");
         assert_eq!(
-            config.deferred_plugins,
-            [
-                "rivet.tool-shell",
-                "rivet.tool-git",
-                "rivet.policy-default",
-                "rivet.sandbox-local"
-            ],
-            "four of the six enabled ids are later phases, and are skipped with a warning"
-        );
-        assert_eq!(
             config.plugins,
-            [
-                "rivet.model-openai",
-                "rivet.tool-filesystem",
-                "rivet.context-builtin"
-            ]
+            PluginSelection::Only(vec![
+                PluginId::new("rivet.model-openai").unwrap(),
+                PluginId::new("rivet.tool-filesystem").unwrap(),
+            ])
         );
     }
 
@@ -636,14 +637,80 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_plugin_id_fails_at_startup() {
+    fn a_malformed_plugin_id_fails_at_startup() {
+        // Whether an id *exists* is the catalog's business, but whether it could ever be
+        // one is knowable here.
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[plugins]\nenabled = [\"toolfilesystem\"]\n");
+        let err = Config::load(dir.path(), &Overrides::default()).unwrap_err();
+        assert!(err.message().contains("namespace.name"), "{err}");
+
+        write_config(dir.path(), "[plugins.\"Rivet.Nope\"]\nkey = 1\n");
+        let err = Config::load(dir.path(), &Overrides::default()).unwrap_err();
+        assert!(err.message().contains("namespace.name"), "{err}");
+    }
+
+    #[test]
+    fn no_enabled_list_means_every_plugin_the_build_provides() {
+        // This is what makes `rivet "explain this repo"` work in a directory with no
+        // `rivet.toml`. Resolving an absent list to *nothing* would leave the run with no
+        // model and no tools, and every end-to-end test writes an explicit list, so
+        // nothing else would notice.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load(dir.path(), &Overrides::default()).unwrap();
+        assert_eq!(config.plugins, PluginSelection::All);
+
+        write_config(dir.path(), "[plugins]\nenabled = []\n");
+        let config = Config::load(dir.path(), &Overrides::default()).unwrap();
+        assert_eq!(config.plugins, PluginSelection::All, "an empty list too");
+    }
+
+    #[test]
+    fn an_enabled_list_is_deduplicated_in_first_seen_order() {
         let dir = tempfile::tempdir().unwrap();
         write_config(
             dir.path(),
-            "[plugins]\nenabled = [\"rivet.tool-filesystm\"]\n",
+            "[plugins]\nenabled = [\"b.two\", \"a.one\", \"b.two\"]\n",
+        );
+        let config = Config::load(dir.path(), &Overrides::default()).unwrap();
+        assert_eq!(
+            config.plugins,
+            PluginSelection::Only(vec![
+                PluginId::new("b.two").unwrap(),
+                PluginId::new("a.one").unwrap()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_plugin_table_may_not_set_the_reserved_agent_key() {
+        // The host injects `agent` into every plugin's table; a file that also sets it
+        // would be silently overwritten.
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[plugins.\"rivet.model-openai\".agent]\nmodel = \"sneaky/model\"\n",
         );
         let err = Config::load(dir.path(), &Overrides::default()).unwrap_err();
-        assert!(err.message().contains("unknown plugin id"), "{err}");
+        assert!(err.message().contains("agent"), "{err}");
+    }
+
+    #[test]
+    fn a_plugins_config_carries_the_agent_object() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            "[agent]\n             model = \"openai/gpt-4o\"\n             instructions = \"be brief\"\n\n             [plugins.\"rivet.model-openai\"]\n             api_key_env = \"K\"\n",
+        );
+        let config = Config::load(dir.path(), &Overrides::default()).unwrap();
+        let value = config.plugin_config(&PluginId::new("rivet.model-openai").unwrap());
+        assert_eq!(value["api_key_env"], "K", "the file's own keys survive");
+        assert_eq!(value["agent"]["model"], "openai/gpt-4o");
+        assert_eq!(value["agent"]["instructions"], "be brief");
+
+        // And a plugin with no table of its own still gets the object.
+        let other = config.plugin_config(&PluginId::new("rivet.context-builtin").unwrap());
+        assert_eq!(other["agent"]["instructions"], "be brief");
     }
 
     #[test]
@@ -691,6 +758,12 @@ mod tests {
             !Profile::ReadOnly
                 .permissions()
                 .allows(&Permission::FsWrite(FsScope::Workspace))
+        );
+        assert!(
+            Profile::ReadOnly
+                .permissions()
+                .allows(&Permission::NetworkHttp(None)),
+            "the provider call is granted to every profile, or no profile can run an agent"
         );
     }
 

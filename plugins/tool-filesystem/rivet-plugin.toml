@@ -1,0 +1,18 @@
+[plugin]
+id           = "rivet.tool-filesystem"
+name         = "Filesystem tools"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "read_file, write_file, list_dir and search, all fenced to the workspace."
+capabilities = ["tool"]
+
+# `write_file` is registered only when the effective grant still contains fs_write after
+# the profile has had its say, so a `readonly` profile disarms this plugin without the
+# host knowing anything about it.
+[[permissions]]
+permission = "fs_read"
+scope      = "workspace"
+
+[[permissions]]
+permission = "fs_write"
+scope      = "workspace"

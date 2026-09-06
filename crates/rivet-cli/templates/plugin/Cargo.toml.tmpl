@@ -1,0 +1,13 @@
+[package]
+name = "{{crate_name}}"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Nothing is published to crates.io yet. Inside the Rivet repository, use the path form
+# instead and add this crate to the workspace `members` list:
+#   rivet-core = { path = "../crates/rivet-core" }
+rivet-core = "0.1"
+async-trait = "0.1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "sync"] }

@@ -1400,8 +1400,10 @@ dependencies = [
  "clap",
  "futures-util",
  "pretty_assertions",
+ "rivet-context-builtin",
  "rivet-core",
  "rivet-model-openai",
+ "rivet-plugin",
  "rivet-runtime",
  "rivet-session",
  "rivet-tool-filesystem",
@@ -1414,6 +1416,18 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rivet-context-builtin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rivet-core",
+ "rivet-plugin",
+ "rivet-runtime",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1456,6 +1470,7 @@ dependencies = [
  "pretty_assertions",
  "reqwest",
  "rivet-core",
+ "rivet-plugin",
  "serde",
  "serde_json",
  "tempfile",
@@ -1469,12 +1484,16 @@ name = "rivet-plugin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
+ "pretty_assertions",
  "rivet-core",
  "rivet-runtime",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -1540,6 +1559,7 @@ dependencies = [
  "async-trait",
  "globset",
  "rivet-core",
+ "rivet-plugin",
  "rivet-runtime",
  "serde",
  "serde_json",

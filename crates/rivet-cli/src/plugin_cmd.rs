@@ -1,0 +1,288 @@
+//! `rivet plugin list | show | new`.
+//!
+//! `list` and `show` stop at `VALIDATED`: they parse manifests, check the ABI and compute
+//! `manifest ∩ profile`, but construct nothing. So neither needs an API key and neither
+//! has a side effect — which is a change from Phase 1, where `rivet plugin list` went
+//! through the whole load path and failed on a machine with no provider key.
+//!
+//! The price is that neither command can print what a plugin *registers*, only what it
+//! declares. `rivet doctor` loads and prints the registrations.
+
+use std::path::{Path, PathBuf};
+
+use rivet_core::capability::{FsScope, Permission};
+use rivet_core::error::Error;
+use rivet_core::id::PluginId;
+use rivet_plugin::PluginRecord;
+use rivet_plugin::loader::state_label;
+
+use crate::catalog;
+use crate::config::Config;
+
+const CARGO_TEMPLATE: &str = include_str!("../templates/plugin/Cargo.toml.tmpl");
+const MANIFEST_TEMPLATE: &str = include_str!("../templates/plugin/rivet-plugin.toml.tmpl");
+const LIB_TEMPLATE: &str = include_str!("../templates/plugin/lib.rs.tmpl");
+
+/// One line per plugin this build provides.
+///
+/// # Errors
+/// A manifest in this build that does not parse.
+pub fn list(config: &Config) -> rivet_core::Result<()> {
+    let loader = catalog::inspect(config.profile)?;
+    // An id the config does not enable still gets a row -- the catalog is what this build
+    // can load, not what this config asked for -- but the column says which is which.
+    let enabled = catalog::select(&loader, &config.plugins)?;
+
+    println!(
+        "{:<10} {:<8} {:<24} {:<8} {:<5} {:<18} ORIGIN",
+        "STATE", "ENABLED", "ID", "VERSION", "ABI", "CAPABILITIES"
+    );
+    for record in loader.records() {
+        // `PluginId` and `CapabilityVersion` render through `write_str`/`write!`, which
+        // ignore a width, so the columns are laid out over owned strings.
+        println!(
+            "{:<10} {:<8} {:<24} {:<8} {:<5} {:<18} {}",
+            state_label(record.state),
+            if enabled.contains(&record.id) {
+                "yes"
+            } else {
+                "no"
+            },
+            record.id.as_str(),
+            record.manifest.version,
+            record.manifest.abi_version.to_string(),
+            capabilities(record),
+            record.origin,
+        );
+        if let Some(error) = &record.error {
+            println!("  ! {error}");
+        }
+    }
+    println!("\nrun `rivet doctor` to load them and see what each one registers");
+    Ok(())
+}
+
+/// A plugin's manifest, capabilities and effective permissions.
+///
+/// # Errors
+/// An id this build does not provide.
+pub fn show(config: &Config, id: &str) -> rivet_core::Result<()> {
+    let plugin_id = PluginId::new(id)?;
+    let loader = catalog::inspect(config.profile)?;
+    let record = loader.record(&plugin_id).ok_or_else(|| {
+        Error::not_found(format!(
+            "no plugin `{id}` in this build. Available: {}.",
+            loader.known_ids()
+        ))
+    })?;
+    let enabled = catalog::select(&loader, &config.plugins)?;
+
+    println!(
+        "{}  \"{}\" {}",
+        record.id, record.manifest.name, record.manifest.version
+    );
+    if !record.manifest.description.is_empty() {
+        println!("  {}", record.manifest.description);
+    }
+    println!(
+        "\n  abi          {} (host {}) {}",
+        record.manifest.abi_version,
+        rivet_core::ABI_VERSION,
+        if record.manifest.is_compatible_with(rivet_core::ABI_VERSION) {
+            "ok"
+        } else {
+            "INCOMPATIBLE — this plugin is rejected before it can register anything"
+        }
+    );
+    println!("  origin       {}", record.origin);
+    println!("  state        {}", state_label(record.state));
+    println!(
+        "  enabled      {}",
+        if enabled.contains(&record.id) {
+            "yes"
+        } else {
+            "no (not in `[plugins].enabled`)"
+        }
+    );
+    println!("  capabilities {}", capabilities(record));
+
+    if record.manifest.permissions.is_empty() {
+        println!("  permissions  (none requested)");
+    } else {
+        println!("  permissions  {:<26} effective", "requested");
+        for wanted in &record.manifest.permissions {
+            println!(
+                "               {:<26} {}",
+                describe(wanted),
+                effect(record, wanted, config.profile.name())
+            );
+        }
+    }
+    if let Some(error) = &record.error {
+        println!("  error        {error}");
+    }
+    Ok(())
+}
+
+/// Scaffold a new plugin crate in the working directory.
+///
+/// # Errors
+/// An id that is not `namespace.name`, a directory that already exists, or an I/O failure.
+pub fn new(id: &str) -> rivet_core::Result<()> {
+    // Validate before touching disk: half a scaffold is worse than none.
+    let plugin_id = PluginId::new(id)?;
+    let crate_name = plugin_id.as_str().replace('.', "-");
+    let dir = PathBuf::from(&crate_name);
+    if dir.exists() {
+        return Err(Error::invalid_argument(format!(
+            "`{}` already exists; `rivet plugin new` will not write into it",
+            dir.display()
+        )));
+    }
+
+    let bare = plugin_id
+        .as_str()
+        .split_once('.')
+        .map_or(plugin_id.as_str(), |(_, rest)| rest);
+    let struct_name = format!("{}Plugin", pascal_case(bare));
+    let module = crate_name.replace('-', "_");
+    let render = |template: &str| {
+        template
+            .replace("{{id}}", plugin_id.as_str())
+            .replace("{{name}}", &title_case(bare))
+            .replace("{{crate_name}}", &crate_name)
+            .replace("{{struct_name}}", &struct_name)
+    };
+
+    std::fs::create_dir_all(dir.join("src")).map_err(|e| io(&dir, e))?;
+    write(&dir.join("Cargo.toml"), &render(CARGO_TEMPLATE))?;
+    write(&dir.join("rivet-plugin.toml"), &render(MANIFEST_TEMPLATE))?;
+    write(&dir.join("src/lib.rs"), &render(LIB_TEMPLATE))?;
+
+    println!("created {crate_name}/{{Cargo.toml,rivet-plugin.toml,src/lib.rs}}");
+    println!("next: add \"{crate_name}\" to the workspace members, then add one line to");
+    println!("      crates/rivet-cli/src/catalog.rs:");
+    println!("        PluginSource::builtin(\"{crate_name}\", {module}::MANIFEST_TOML,");
+    println!("                              |m| Arc::new({module}::{struct_name}::new(m))),");
+    println!("      (in-process plugins are linked; out-of-process loading is Phase 6)");
+    Ok(())
+}
+
+// --- rendering helpers -------------------------------------------------------------------
+
+fn capabilities(record: &PluginRecord) -> String {
+    record
+        .manifest
+        .capabilities
+        .iter()
+        .map(|kind| {
+            serde_json::to_value(kind)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{kind:?}"))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// What the profile did to one requested permission.
+fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
+    if record.denied.contains(wanted) {
+        format!("removed by profile `{profile}`")
+    } else if record.effective.contains(wanted) {
+        "granted".to_string()
+    } else {
+        // Met, but not to what was asked for: the profile capped a wider request.
+        format!("narrowed by profile `{profile}`")
+    }
+}
+
+/// A permission as a manifest would spell it, with its scope.
+fn describe(permission: &Permission) -> String {
+    match permission {
+        Permission::FsRead(scope) => format!("fs_read({})", fs_scope(scope)),
+        Permission::FsWrite(scope) => format!("fs_write({})", fs_scope(scope)),
+        Permission::ProcessSpawn => "process_spawn".to_string(),
+        Permission::NetworkHttp(None) => "network_http(any host)".to_string(),
+        Permission::NetworkHttp(Some(hosts)) => format!("network_http({})", hosts.join(" ")),
+        Permission::SessionRead => "session_read".to_string(),
+        Permission::SessionWrite => "session_write".to_string(),
+        Permission::EventsSubscribe => "events_subscribe".to_string(),
+        Permission::EventsPublish => "events_publish".to_string(),
+        Permission::SecretsRead(keys) => format!("secrets_read({})", keys.join(" ")),
+        Permission::JobManage => "job_manage".to_string(),
+    }
+}
+
+fn fs_scope(scope: &FsScope) -> String {
+    match scope {
+        FsScope::Subtree(path) => format!("subtree {path}"),
+        FsScope::Workspace => "workspace".to_string(),
+        FsScope::Anywhere => "anywhere".to_string(),
+    }
+}
+
+/// `tool-lint` -> `ToolLint`.
+fn pascal_case(text: &str) -> String {
+    text.split(['-', '_', '.'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
+        })
+        .collect()
+}
+
+/// `tool-lint` -> `Tool lint`.
+fn title_case(text: &str) -> String {
+    let spaced = text.replace(['-', '_'], " ");
+    let mut chars = spaced.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + chars.as_str()
+    })
+}
+
+fn write(path: &Path, contents: &str) -> rivet_core::Result<()> {
+    std::fs::write(path, contents).map_err(|e| io(path, e))
+}
+
+fn io(path: &Path, error: std::io::Error) -> Error {
+    Error::internal(format!("could not write `{}`", path.display())).with_cause(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_derived_from_the_id() {
+        assert_eq!(pascal_case("tool-lint"), "ToolLint");
+        assert_eq!(pascal_case("hello"), "Hello");
+        assert_eq!(title_case("tool-lint"), "Tool lint");
+    }
+
+    #[test]
+    fn every_permission_has_a_rendering() {
+        // The `plugin show` table is the only place an operator sees the scope of a
+        // grant; a variant falling through to `{:?}` would print Rust, not a manifest.
+        assert_eq!(
+            describe(&Permission::FsWrite(FsScope::Subtree("docs".into()))),
+            "fs_write(subtree docs)"
+        );
+        assert_eq!(
+            describe(&Permission::NetworkHttp(None)),
+            "network_http(any host)"
+        );
+        assert_eq!(
+            describe(&Permission::NetworkHttp(Some(vec!["a.test".into()]))),
+            "network_http(a.test)"
+        );
+        assert_eq!(
+            describe(&Permission::SecretsRead(vec!["K".into()])),
+            "secrets_read(K)"
+        );
+        assert_eq!(describe(&Permission::JobManage), "job_manage");
+    }
+}

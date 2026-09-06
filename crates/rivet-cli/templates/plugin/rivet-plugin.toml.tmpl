@@ -1,0 +1,17 @@
+[plugin]
+id           = "{{id}}"
+name         = "{{name}}"
+version      = "0.1.0"
+# Checked against the host's contract version before anything is constructed. Major 0
+# treats every minor bump as breaking, so a `0.1` host loads only `0.1` plugins.
+abi_version  = "0.1"
+description  = "TODO: what this plugin adds, in one line."
+# Every slot this plugin registers into. Registering into one that is not listed here is
+# refused by the loader.
+capabilities = ["tool"]
+
+# What the plugin asks for. The effective grant is this met with the active profile, and
+# a plugin can never widen it -- read `ctx.permissions`, not this file, at runtime.
+[[permissions]]
+permission = "fs_read"
+scope      = "workspace"

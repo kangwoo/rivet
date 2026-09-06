@@ -366,7 +366,7 @@ Policy가 순수 함수여야 하는 이유도 이것이다: 감사 시점에 �
 
 ## 8. 프로파일
 
-| 프로파일 | fs write | process | network | 승인 | 용도 |
+| 프로파일 | fs write | process | network (도구) | 승인 | 용도 |
 |---|---|---|---|---|---|
 | `developer` | 워크스페이스 | ✓ | ✓ | 파괴적 작업만 | 로컬 개발 |
 | `readonly` | ✗ | 제한적 | ✗ | — | 조사·질의 |
@@ -377,6 +377,20 @@ Policy가 순수 함수여야 하는 이유도 이것이다: 감사 시점에 �
 ```bash
 rivet --profile readonly "왜 이 테스트가 실패하지?"
 ```
+
+> **⚠ `network` 열은 아직 어느 프로파일에서도 강제되지 않는다.** 그리고 Phase 2 기준으로
+> 프로파일은 **provider 호출과 도구 egress를 구분하지 못한다.**
+>
+> `fs write` 열은 Phase 2부터 진짜다 — `manifest ∩ profile`이 실제로 계산되고,
+> `readonly`에서 `write_file`은 등록조차 되지 않는다. 그런데 권한 어휘에는
+> `NetworkHttp` 하나뿐이고 모델 plugin과 도구 plugin이 그것을 공유한다. 그래서
+> `readonly`에 네트워크를 주지 않으면 위의 예시 명령 자체가 돌지 않는다 — 모델을
+> 부르지 못하는 프로파일은 에이전트를 돌릴 수 없다.
+>
+> 그래서 **모든 프로파일이 `NetworkHttp(None)`을 준다.** 이 열이 뜻하는 "도구가 밖으로
+> 나갈 수 있는가"는 Phase 4의 샌드박스가 붙기 전까지 아무것도 강제하지 않으며,
+> `production`의 "허용 목록"도 마찬가지다. 프로파일이 provider 호출만 따로 금지할 수
+> 있으려면 어휘에 별도 permission이 필요하고, 그것은 `rivet-core` 계약 변경이다.
 
 ---
 

@@ -51,11 +51,63 @@ scope      = "workspace"
 permission = "process_spawn"
 ```
 
+이 파일은 crate 루트에 두고 코드에 문자열로 박아 넣는다.
+
+```rust
+pub const MANIFEST_TOML: &str = include_str!("../rivet-plugin.toml");
+```
+
+**매니페스트는 파일 하나뿐이다.** Rust 리터럴로 따로 만들지 않으므로 `rivet plugin show`가
+보여주는 것과 plugin의 `manifest()`가 돌려주는 것이 어긋날 수 없다.
+
 `abi_version`은 **등록 전에** 검사된다. 호환되지 않으면 plugin이 아무것도 등록하지
-못한 채 거부된다.
+못한 채 거부된다 — `load()`가 호출조차 되지 않는다.
 
 major `0`은 Cargo와 같이 **모든 minor 변경을 breaking으로** 취급한다.
 `0.1` 호스트는 `0.1` plugin만 받는다.
+
+### 2.1 파싱 규칙
+
+**모르는 키는 에러다.** `[plugin]` 안에서도, `[[permissions]]` 항목 안에서도, 최상위
+테이블에서도. 오타가 조용히 "없는 권한"이 되는 쪽이 훨씬 나쁘다.
+
+`capabilities`는 비어 있을 수 없고, `abi_version`은 정확히 `major.minor`여야 한다
+(`"0.1.2"`는 에러다 — 조용히 버려지는 것보다 낫다).
+
+### 2.2 `scope` 문법
+
+| `permission` | `scope` | 뜻 |
+|---|---|---|
+| `fs_read` / `fs_write` | `"workspace"` / `"anywhere"` | 워크스페이스 / 호스트 전체 |
+| `fs_read` / `fs_write` | `{ subtree = "docs/api" }` | 그 하위 트리만 |
+| `network_http` | 없음 | 모든 호스트 |
+| `network_http` | `["api.openai.com"]` | 허용 목록 (빈 배열은 에러) |
+| `secrets_read` | `["DEEPSEEK_API_KEY"]` | 필수, 비어 있을 수 없음 |
+| 나머지 전부 | 없음 | `scope`를 적으면 에러 |
+
+`{ subtree = "../../../etc" }`처럼 워크스페이스를 벗어나는 하위 트리는 **파싱 시점에**
+거부된다. 나중에 meet에서 조용히 사라지게 두면, 매니페스트가 잘못됐다는 사실 대신 권한이
+0개인 채로 로드된 plugin이 남는다.
+
+### 2.3 선언하지 않은 슬롯에는 등록할 수 없다
+
+`capabilities`에 없는 슬롯에 `register_*`를 부르면 로더가 그 호출을 거부하고, 그 plugin의
+load 전체가 롤백된다. `Interceptor`에는 대응하는 `CapabilityKind`가 없으므로
+`capabilities = ["policy"]`로 선언한다 — 둘 다 "이 tool call이 진행돼도 되는가"에
+답하는 자리다.
+
+### 2.4 in-process plugin은 호스트 카탈로그에도 등록한다
+
+in-process plugin은 링크된다. 매니페스트를 쓰는 것만으로는 아무 일도 일어나지 않고,
+호스트의 카탈로그(`crates/rivet-cli/src/catalog.rs`)에 한 줄이 필요하다.
+
+```rust
+PluginSource::builtin("acme-tool-lint", acme_tool_lint::MANIFEST_TOML,
+                      |m| Arc::new(acme_tool_lint::ToolLintPlugin::new(m))),
+```
+
+`rivet plugin new <id>`가 crate를 만들고 이 줄을 그대로 출력한다. 별도 프로세스 로딩은
+Phase 6다.
 
 ---
 
@@ -92,18 +144,23 @@ impl Tool for HelloTool {
     }
 }
 
+/// The loader parses `rivet-plugin.toml` and hands the result to the constructor, so the
+/// plugin never builds a manifest of its own.
 #[derive(Debug)]
-pub struct HelloPlugin;
+pub struct HelloPlugin {
+    manifest: PluginManifest,
+}
+
+impl HelloPlugin {
+    pub fn new(manifest: PluginManifest) -> Self {
+        Self { manifest }
+    }
+}
 
 #[async_trait]
 impl Plugin for HelloPlugin {
     fn manifest(&self) -> PluginManifest {
-        PluginManifest::new(
-            PluginId::new("example.hello").unwrap(),
-            "Hello",
-            "0.1.0",
-        )
-        .with_capabilities([CapabilityKind::Tool])
+        self.manifest.clone()
     }
 
     async fn load(&self, ctx: PluginContext) -> Result<PluginHandle> {
@@ -149,8 +206,9 @@ async fn load(&self, ctx: PluginContext) -> Result<PluginHandle> {
 ```
 
 `PluginContext::shutdown`은 런타임 종료 또는 이 plugin 언로드 시 취소된다.
-이벤트 구독 태스크는 런타임이 소유자별로 추적해 언로드 시 abort하지만, plugin이 직접 띄운
-태스크는 plugin 책임이다.
+**인스턴스마다 다른 토큰이다** — 옆 plugin이 언로드돼도 내 백그라운드 작업은 멈추지
+않는다. 이벤트 구독 태스크는 런타임이 소유자별로 추적해 언로드 시 abort하지만, plugin이
+직접 띄운 태스크는 plugin 책임이다.
 
 ### 4.2 권한은 넓힐 수 없다
 
@@ -160,11 +218,22 @@ effective = manifest.permissions ∩ profile.permissions ∩ session overrides
 
 `ctx.permissions`가 실제로 받은 것이다. 매니페스트에 적었다고 받은 게 아니다.
 
+권한이 깎였을 때 어떻게 할지는 **두 가지 관용구가 있고 둘 다 옳다.** 어느 쪽인지는
+plugin이 정한다.
+
 ```rust
+// (1) 크게 실패한다 -- 그 권한 없이는 이 plugin이 할 일이 없을 때.
+//     `rivet.model-openai`가 network_http에 대해 이렇게 한다.
 if !ctx.permissions.contains(&Permission::ProcessSpawn) {
     return Err(Error::plugin(
         "rivet.tool-shell requires process_spawn; the active profile denies it"
     ));
+}
+
+// (2) 줄여서 등록한다 -- 남은 권한으로 할 수 있는 일이 아직 있을 때.
+//     `rivet.tool-filesystem`이 readonly에서 write_file만 빼고 등록하는 것이 이쪽이다.
+if ctx.permissions.allows(&Permission::FsWrite(FsScope::Workspace)) {
+    ctx.registry.register_tool(Arc::new(WriteFile)).await?;
 }
 ```
 
@@ -295,7 +364,9 @@ async fn tool_registers_and_unregisters_cleanly() {
         instance_id: PluginInstanceId::new(),
     };
 
-    HelloPlugin.load(ctx_for(&registry, &owner)).await.unwrap();
+    let manifest = rivet_plugin::parse(MANIFEST_TOML).unwrap();
+    let plugin = HelloPlugin::new(manifest);
+    plugin.load(ctx_for(&registry, &owner)).await.unwrap();
     assert!(registry.tool("hello").await.is_some());
 
     registry.unregister_all(owner.instance_id).await;
@@ -303,13 +374,25 @@ async fn tool_registers_and_unregisters_cleanly() {
 }
 ```
 
-최소 다음 다섯 가지를 테스트한다.
+최소 다음 여섯 가지를 테스트한다.
 
 1. 정상 등록 · 해제
 2. `load()` 중 실패 시 잔여물 없음
 3. 권한이 거부됐을 때 명확히 실패
 4. 취소가 5초 안에 반영
 5. `Err` / `is_error` 구분이 의도대로
+6. `rivet-plugin.toml`이 파싱되고, `version`이 crate 버전과 같고, `capabilities`가
+   실제로 등록하는 슬롯을 전부 포함한다 — 로더가 load 시점에 잡아 주지만, 이 테스트는
+   작성자가 아직 고칠 수 있는 빌드 시점에 잡는다
+
+```rust
+#[test]
+fn the_manifest_matches_the_crate() {
+    let manifest = rivet_plugin::parse(MANIFEST_TOML).unwrap();
+    assert_eq!(manifest.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest.capabilities, [CapabilityKind::Tool]);
+}
+```
 
 ---
 
@@ -323,8 +406,21 @@ DISCOVERED → VALIDATED → LOADED → ACTIVE → UNLOADING → UNLOADED
               load() 중 실패 → unregister_all() ──────┘
 ```
 
-`VALIDATED` 단계에서 ABI와 권한이 검사되므로, 호환되지 않는 plugin은 **등록을 시도하기
-전에** 걸러진다.
+`VALIDATED` 단계에서 ABI가 검사되고 `manifest ∩ profile`이 계산된다. 아무것도 생성되지
+않으므로, 호환되지 않는 plugin은 **등록을 시도하기 전에** 걸러진다. 권한이 좁혀진 것은
+실패가 아니다 — 그걸 어떻게 할지는 plugin이 `load`에서 정한다(§4.2).
+
+`LOADED`에서 `ACTIVE`로는 **배치 전체가 성공했을 때만** 올라간다. 하나라도 실패하면
+성공한 것들은 `LOADED`에 남고, 호스트가 곧 그것들을 정리한다. 즉 `LOADED`에 남아 있는
+기록은 "곧 내려갈 것"이라는 뜻이다.
+
+`UNLOADED`가 된 plugin은 **같은 이름으로 다시 로드할 수 있다.** 새 `PluginInstanceId`가
+발급되므로 되살아난 인스턴스가 아니라 새 인스턴스다. `FAILED`는 종점이다 — 그 프로세스
+안에서 재시도되지 않고, 이유는 `rivet plugin list`를 위해 보존된다.
+
+`load()`가 **패닉**해도 `Err`와 같은 길을 간다: 등록이 되돌려지고, 그 인스턴스의
+취소 토큰이 취소되고, 기록은 `FAILED`가 된다. (plugin이 직접 띄운 태스크 안의 패닉은
+잡히지 않는다.)
 
 ---
 

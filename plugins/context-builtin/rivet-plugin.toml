@@ -1,0 +1,10 @@
+[plugin]
+id           = "rivet.context-builtin"
+name         = "Built-in context providers"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "The system prompt and the workspace sketch. Not optional: the loop cannot assemble a request without them."
+capabilities = ["context_provider"]
+
+# No permissions. Both providers read only what the host already handed them: the
+# instructions come from config, and the workspace sketch is walked by the runtime.

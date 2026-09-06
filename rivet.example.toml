@@ -22,20 +22,24 @@ max_consecutive_tool_errors = 5
 # code execution paths: write access to git config is shell access.
 deny = [".env", ".git/config", ".ssh", "**/credentials.json", "**/*.pem"]
 
-# Phase 1 implements the first two. The rest are listed because this file describes where
-# the project is going; they warn and are skipped until the phase that provides them. An id
-# in neither group is a typo and fails at startup.
+# Since Phase 2 there is no middle category: an id here either loads or is a typo, and a
+# typo fails at startup listing the ids this build provides. `rivet.tool-shell`,
+# `rivet.tool-git`, `rivet.policy-default` and `rivet.sandbox-local` are therefore *not*
+# listed until Phase 4 ships them -- a plugin that registers nothing would only lie to
+# `rivet plugin list`.
+#
+# Leaving this key out (or empty) means "every plugin this build provides", which is what
+# makes `rivet "explain this repo"` work with no configuration file at all.
 #
 # `rivet.context-builtin` (the system-prompt and workspace providers) is always registered:
 # the loop cannot assemble a request without it, so it is not an option to switch off.
+#
+# `rivet plugin list` prints what this build has; `rivet plugin show <id>` prints one
+# plugin's manifest and the permissions the active profile leaves it.
 [plugins]
 enabled = [
     "rivet.model-openai",
     "rivet.tool-filesystem",
-    "rivet.tool-shell",
-    "rivet.tool-git",
-    "rivet.policy-default",
-    "rivet.sandbox-local",
 ]
 
 [plugins."rivet.model-openai"]

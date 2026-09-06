@@ -1,0 +1,72 @@
+//! {{name}} — a Rivet plugin.
+
+use std::sync::Arc;
+
+// The prelude carries every contract a plugin needs: `Plugin`, `PluginContext`,
+// `PluginHandle`, `PluginManifest`, `Tool`, `ToolSpec`, `Result`, `async_trait`.
+use rivet_core::prelude::*;
+
+/// This crate's manifest, for a host catalog to hand to the loader.
+pub const MANIFEST_TOML: &str = include_str!("../rivet-plugin.toml");
+
+#[derive(Debug)]
+struct HelloTool;
+
+#[async_trait]
+impl Tool for HelloTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            "hello",
+            // Write the description for the *model*, not for a human: say when to use
+            // this tool, and when not to.
+            "Greet someone by name. Use only when the user explicitly asks for a greeting.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }),
+        )
+        .expect("a literal spec is valid")
+    }
+
+    async fn execute(&self, ctx: ToolContext, input: serde_json::Value) -> Result<ToolResult> {
+        // Ignoring cancellation stops the whole run, not just this tool.
+        ctx.check_cancelled()?;
+        let name = input["name"].as_str().unwrap_or("world");
+        Ok(ToolResult::ok(format!("Hello, {name}!")))
+    }
+}
+
+/// {{name}}.
+#[derive(Debug)]
+pub struct {{struct_name}} {
+    manifest: PluginManifest,
+}
+
+impl {{struct_name}} {
+    #[must_use]
+    pub fn new(manifest: PluginManifest) -> Self {
+        Self { manifest }
+    }
+}
+
+#[async_trait]
+impl Plugin for {{struct_name}} {
+    fn manifest(&self) -> PluginManifest {
+        self.manifest.clone()
+    }
+
+    async fn load(&self, ctx: PluginContext) -> Result<PluginHandle> {
+        // Fail loudly here if something you need was denied. Failing at the first tool
+        // call instead means the operator finds out mid-run.
+        let _ = &ctx.permissions;
+        ctx.registry.register_tool(Arc::new(HelloTool)).await?;
+        Ok(PluginHandle::new(["tool:hello".to_string()]))
+    }
+
+    async fn unload(&self, _ctx: PluginContext) -> Result<()> {
+        // The loader has already unregistered everything above. Stop only what you
+        // started yourself -- background tasks are not the loader's to track.
+        Ok(())
+    }
+}

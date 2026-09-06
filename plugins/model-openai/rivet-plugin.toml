@@ -1,0 +1,12 @@
+[plugin]
+id           = "rivet.model-openai"
+name         = "OpenAI-compatible models"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "One chat-completions adapter for OpenAI, DeepSeek, Ollama, vLLM and OpenRouter."
+capabilities = ["model"]
+
+# No host list: `base_url` is configuration, so the endpoint is not knowable here. A
+# profile that names hosts narrows this to its own list.
+[[permissions]]
+permission = "network_http"

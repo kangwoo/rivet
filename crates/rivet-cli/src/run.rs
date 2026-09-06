@@ -16,7 +16,7 @@ use rivet_runtime::jitter::FullJitter;
 use rivet_session::JsonlSessionStore;
 use tokio_util::sync::CancellationToken;
 
-use crate::bootstrap::{self, Loaded};
+use crate::catalog::{self, Host};
 use crate::config::Config;
 use crate::render::{human::HumanRenderer, jsonl::JsonlRenderer};
 
@@ -39,8 +39,7 @@ pub async fn start(
     // Before a session exists: an empty session left behind by a missing key is noise in
     // `rivet session list` forever.
     config.check_credentials()?;
-    let loaded = bootstrap::load(config).await?;
-    report_deferred(&loaded);
+    let mut host = catalog::load(config).await?;
     let store = Arc::new(JsonlSessionStore::new(&config.sessions_dir));
 
     let session_id = SessionId::new();
@@ -58,7 +57,7 @@ pub async fn start(
     let state = SessionState::replay(&store.read(session_id, 1, 1_000).await?);
     drive(
         config,
-        &loaded,
+        &mut host,
         store,
         session_id,
         state,
@@ -100,9 +99,8 @@ pub async fn resume(
             Ok(None)
         }
         rivet_runtime::session_recovery::ResumePlan::Continue => {
-            let loaded = bootstrap::load(config).await?;
-            report_deferred(&loaded);
-            let summary = drive(config, &loaded, store, session_id, state, None, output).await?;
+            let mut host = catalog::load(config).await?;
+            let summary = drive(config, &mut host, store, session_id, state, None, output).await?;
             Ok(Some(summary))
         }
     }
@@ -137,7 +135,7 @@ fn check_workspace(
 /// Wire up the renderers, the signal handler and the loop, then run.
 async fn drive(
     config: &Config,
-    loaded: &Loaded,
+    host: &mut Host,
     store: Arc<JsonlSessionStore>,
     session_id: SessionId,
     state: SessionState,
@@ -148,10 +146,10 @@ async fn drive(
         Output::Human => Arc::new(HumanRenderer::new()),
         Output::Jsonl => Arc::new(JsonlRenderer::new()),
     };
-    let render_task = loaded.bus.attach(subscriber);
+    let render_task = host.bus.attach(subscriber);
 
     let agent = agent_spec(config);
-    let providers = loaded.registry.context_providers().await;
+    let providers = host.registry.context_providers().await;
     // Phase 1's agent never names providers, so this takes the "all of them" branch. The
     // selecting branch exists so a named agent works the moment there is a way to pick one.
     let assembler = ContextAssembler::for_agent(providers, &agent.context_providers)?;
@@ -165,9 +163,9 @@ async fn drive(
     cfg.cancel = cancel;
 
     let agent_loop = AgentLoop::new(
-        loaded.registry.clone(),
+        host.registry.clone(),
         store,
-        loaded.registry.events(),
+        host.registry.events(),
         assembler,
         Arc::new(ExponentialBackoff::default()),
         Arc::new(FullJitter::for_run(cfg.run_id)),
@@ -176,10 +174,14 @@ async fn drive(
     let summary = agent_loop.run(cfg, state, input).await;
 
     signals.abort();
-    loaded.shutdown();
+    host.shutdown();
     // Give the renderer a moment to drain before the process exits.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     render_task.abort();
+    // `Plugin::unload` finally has a caller on the normal path: a plugin that started
+    // something of its own gets told the run is over, rather than being left to process
+    // exit.
+    host.loader.unload_all().await;
 
     let summary = summary?;
     if output == Output::Human {
@@ -209,11 +211,5 @@ fn report(summary: &RunSummary) {
     );
     if let StopReason::Error { message } = &summary.stop {
         eprintln!("  ! {message}");
-    }
-}
-
-fn report_deferred(loaded: &Loaded) {
-    for id in &loaded.deferred {
-        eprintln!("  · `{id}` is enabled but ships in a later phase; skipping");
     }
 }

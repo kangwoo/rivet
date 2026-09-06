@@ -22,6 +22,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The manifest is a file now, so the tests that keep it honest need the parser.
+rivet-plugin.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

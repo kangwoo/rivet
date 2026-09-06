@@ -20,8 +20,7 @@ pub mod write_file;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rivet_core::capability::{CapabilityKind, FsScope, Permission};
-use rivet_core::id::PluginId;
+use rivet_core::capability::{FsScope, Permission, PermissionSet};
 use rivet_core::plugin::{Plugin, PluginContext, PluginHandle, PluginManifest};
 use rivet_core::tool::Tool;
 
@@ -33,61 +32,36 @@ pub use write_file::WriteFile;
 /// The plugin id this crate registers under.
 pub const PLUGIN_ID: &str = "rivet.tool-filesystem";
 
-/// Registers the four filesystem tools.
+/// This crate's `rivet-plugin.toml`, for a host catalog to hand to the loader.
+pub const MANIFEST_TOML: &str = include_str!("../rivet-plugin.toml");
+
+/// Registers the filesystem tools the effective grant allows.
 ///
-/// `writable` is how a read-only profile disarms this plugin in Phase 1: the write tool is
-/// simply not registered, so it never reaches the model's tool list. That narrows the
+/// A `readonly` profile disarms this plugin by meeting `fs_write` away: `write_file` is
+/// then never registered, so it never reaches the model's tool list. That narrows the
 /// **agent's tool scope**, which is pipeline step 2 — it is not a policy, and Phase 4's
 /// real enforcement is still to come.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FilesystemPlugin {
-    writable: bool,
-}
-
-impl Default for FilesystemPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
+    manifest: PluginManifest,
 }
 
 impl FilesystemPlugin {
-    /// A plugin offering all four tools.
     #[must_use]
-    pub fn new() -> Self {
-        Self { writable: true }
+    pub fn new(manifest: PluginManifest) -> Self {
+        Self { manifest }
     }
 
-    /// A plugin offering only the three read-only tools.
-    #[must_use]
-    pub fn read_only() -> Self {
-        Self { writable: false }
-    }
-
-    /// The manifest, also used by `rivet plugin show`.
+    /// The tools this plugin registers under `permissions`.
     ///
-    /// # Panics
-    /// Never: [`PLUGIN_ID`] is a valid plugin id and there is a test that says so.
+    /// `allows` rather than `contains`: a profile that granted a narrower scope than the
+    /// manifest asked for still grants write access, and the careful plugin must not be
+    /// punished for it.
     #[must_use]
-    pub fn manifest_for(writable: bool) -> PluginManifest {
-        let mut permissions = vec![Permission::FsRead(FsScope::Workspace)];
-        if writable {
-            permissions.push(Permission::FsWrite(FsScope::Workspace));
-        }
-        PluginManifest::new(
-            PluginId::new(PLUGIN_ID).expect("PLUGIN_ID is a valid plugin id"),
-            "Filesystem tools",
-            env!("CARGO_PKG_VERSION"),
-        )
-        .with_capabilities([CapabilityKind::Tool])
-        .with_permissions(permissions)
-    }
-
-    /// The tools this plugin would register.
-    #[must_use]
-    pub fn tools(self) -> Vec<Arc<dyn Tool>> {
+    pub fn tools_for(permissions: &PermissionSet) -> Vec<Arc<dyn Tool>> {
         let mut tools: Vec<Arc<dyn Tool>> =
             vec![Arc::new(ReadFile), Arc::new(ListDir), Arc::new(Search)];
-        if self.writable {
+        if permissions.allows(&Permission::FsWrite(FsScope::Workspace)) {
             tools.push(Arc::new(WriteFile));
         }
         tools
@@ -97,12 +71,12 @@ impl FilesystemPlugin {
 #[async_trait]
 impl Plugin for FilesystemPlugin {
     fn manifest(&self) -> PluginManifest {
-        Self::manifest_for(self.writable)
+        self.manifest.clone()
     }
 
     async fn load(&self, ctx: PluginContext) -> rivet_core::Result<PluginHandle> {
         let mut registered = Vec::new();
-        for tool in self.tools() {
+        for tool in Self::tools_for(&ctx.permissions) {
             let name = tool.spec().name;
             ctx.registry.register_tool(tool).await?;
             registered.push(format!("tool:{name}"));
@@ -118,6 +92,82 @@ impl Plugin for FilesystemPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_core::id::PluginId;
+
+    fn names(permissions: &PermissionSet) -> Vec<String> {
+        FilesystemPlugin::tools_for(permissions)
+            .iter()
+            .map(|t| t.spec().name)
+            .collect()
+    }
+
+    fn manifest() -> PluginManifest {
+        rivet_plugin::parse(MANIFEST_TOML).expect("the shipped manifest parses")
+    }
+
+    #[test]
+    fn the_manifest_matches_the_crate() {
+        let manifest = manifest();
+        assert_eq!(manifest.id.as_str(), PLUGIN_ID);
+        assert_eq!(manifest.version, env!("CARGO_PKG_VERSION"));
+        assert!(manifest.is_compatible_with(rivet_core::ABI_VERSION));
+    }
+
+    #[test]
+    fn the_manifest_declares_every_slot_this_plugin_registers() {
+        // The guard refuses an undeclared slot at load time; this catches the same
+        // mismatch at build time, where the author can still fix the manifest.
+        assert_eq!(
+            manifest().capabilities,
+            [rivet_core::capability::CapabilityKind::Tool]
+        );
+    }
+
+    #[test]
+    fn the_manifest_asks_for_exactly_the_workspace() {
+        assert_eq!(
+            manifest().permissions,
+            [
+                Permission::FsRead(FsScope::Workspace),
+                Permission::FsWrite(FsScope::Workspace)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_grant_without_write_does_not_offer_a_write_tool() {
+        // DoD 3, at the plugin end: `readonly` meets `fs_write` away, and the tool the
+        // model is never offered is the tool it cannot call.
+        let readonly = PermissionSet::new([Permission::FsRead(FsScope::Workspace)]);
+        assert_eq!(names(&readonly), ["read_file", "list_dir", "search"]);
+    }
+
+    #[test]
+    fn a_grant_with_write_offers_all_four() {
+        let developer = PermissionSet::new([
+            Permission::FsRead(FsScope::Workspace),
+            Permission::FsWrite(FsScope::Workspace),
+        ]);
+        assert_eq!(
+            names(&developer),
+            ["read_file", "list_dir", "search", "write_file"]
+        );
+    }
+
+    #[test]
+    fn a_subtree_write_grant_does_not_offer_the_workspace_write_tool() {
+        // `write_file` is fenced to the workspace, not to a subtree, so a grant narrower
+        // than the tool's own reach must not hand it over: offering it would widen the
+        // grant the profile computed.
+        let narrow = PermissionSet::new([Permission::FsWrite(FsScope::Subtree("docs".into()))]);
+        assert!(!names(&narrow).contains(&"write_file".to_string()));
+
+        let wide = PermissionSet::new([Permission::FsWrite(FsScope::Anywhere)]);
+        assert!(
+            names(&wide).contains(&"write_file".to_string()),
+            "a wider grant still covers it"
+        );
+    }
 
     #[test]
     fn the_plugin_id_is_valid() {
@@ -125,26 +175,14 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_plugin_does_not_offer_a_write_tool() {
-        let names: Vec<String> = FilesystemPlugin::read_only()
-            .tools()
-            .iter()
-            .map(|t| t.spec().name)
-            .collect();
-        assert_eq!(names, ["read_file", "list_dir", "search"]);
-        assert!(
-            !FilesystemPlugin::manifest_for(false)
-                .permissions
-                .contains(&Permission::FsWrite(FsScope::Workspace)),
-            "and it does not ask for write permission either"
-        );
-    }
-
-    #[test]
     fn every_spec_passes_the_runtimes_schema_check() {
         // The validator's vocabulary is closed; a tool declaring a keyword it does not
         // enforce must fail to load rather than advertise a constraint that does nothing.
-        for tool in FilesystemPlugin::new().tools() {
+        let all = PermissionSet::new([
+            Permission::FsRead(FsScope::Workspace),
+            Permission::FsWrite(FsScope::Workspace),
+        ]);
+        for tool in FilesystemPlugin::tools_for(&all) {
             rivet_runtime::schema::validate_spec(&tool.spec())
                 .unwrap_or_else(|e| panic!("{}: {e}", tool.spec().name));
         }

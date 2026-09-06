@@ -22,6 +22,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# The manifest is a file now, so the tests that keep it honest need the parser.
+rivet-plugin.workspace = true
 # `net` is not in the workspace tokio feature list; the loopback tests below need a
 # real listener and must not depend on another crate's features unifying it in.
 tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
