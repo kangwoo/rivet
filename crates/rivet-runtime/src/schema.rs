@@ -22,7 +22,7 @@ use rivet_core::tool::ToolSpec;
 use serde_json::Value;
 
 /// Keywords the validator enforces.
-const ENFORCED: [&str; 14] = [
+const ENFORCED: [&str; 15] = [
     "type",
     "properties",
     "required",
@@ -37,6 +37,7 @@ const ENFORCED: [&str; 14] = [
     "minLength",
     "maxLength",
     "minItems",
+    "maxItems",
 ];
 
 /// Keywords that document rather than constrain, and are safe to ignore.
@@ -88,9 +89,7 @@ fn check_vocabulary(schema: &Value, path: &str, unsupported: &mut Vec<String>) {
         if ANNOTATIONS.contains(&key.as_str()) {
             continue;
         }
-        // `minItems`/`maxItems` share a check; listing both in ENFORCED would be
-        // redundant, so `maxItems` is matched here.
-        if !ENFORCED.contains(&key.as_str()) && key != "maxItems" {
+        if !ENFORCED.contains(&key.as_str()) {
             unsupported.push(format!("{path}.{key}"));
             continue;
         }

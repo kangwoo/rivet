@@ -135,6 +135,12 @@ enum PluginCommand {
     },
 }
 
+/// How long a still-running blocking task may delay process exit.
+///
+/// Long enough for work that is genuinely finishing, short enough that an uncooperative
+/// tool cannot turn Ctrl-C into a hang.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
@@ -153,6 +159,17 @@ fn main() -> std::process::ExitCode {
         }
     };
     let code = runtime.block_on(dispatch(cli));
+
+    // Do not let a wedged blocking task hold the process open. Dropping a runtime waits
+    // for every `spawn_blocking` thread, and a tool that ignored cancellation is exactly
+    // such a thread -- `read_file` on a named pipe with no writer never returns. The loop
+    // already abandoned it inside the five-second budget and wrote the log; waiting for
+    // it here would spend that budget and then hang anyway, which is the difference
+    // between "Ctrl-C stops the run" and "Ctrl-C needs a second Ctrl-C".
+    //
+    // The grace is for blocking work that is about to finish on its own; anything still
+    // running after it is left to the exiting process.
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
     std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 

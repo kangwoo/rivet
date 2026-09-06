@@ -394,9 +394,14 @@ impl PluginRegistry for ScopedRegistry {
     }
 
     async fn register_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
-        let name = tool.spec().name;
+        let spec = tool.spec();
+        // The vocabulary check belongs here, not in a caller. `schema`'s module doc
+        // promises that a tool advertising an unenforced keyword never loads; a check
+        // that only the CLI runs leaves that promise false for every other embedder,
+        // and false at exactly the moment a policy is reading the arguments.
+        crate::schema::validate_spec(&spec)?;
         let mut tables = self.registry.tables.write().await;
-        table!(tables, tools, "tool").insert(name, self.owner.clone(), tool)
+        table!(tables, tools, "tool").insert(spec.name, self.owner.clone(), tool)
     }
 
     async fn register_context_provider(&self, provider: Arc<dyn ContextProvider>) -> Result<()> {
@@ -522,6 +527,53 @@ mod tests {
         assert!(reg.tool("shell").await.is_some());
         assert!(reg.tool("nope").await.is_none());
         assert_eq!(reg.tool_names().await, vec!["shell"]);
+    }
+
+    /// A tool whose schema declares a constraint nothing enforces.
+    #[derive(Debug)]
+    struct UnenforceableTool;
+
+    #[async_trait]
+    impl Tool for UnenforceableTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::new(
+                "grep",
+                "advertises a pattern the validator cannot check",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "q": { "type": "string", "pattern": "^[a-z]+$" } }
+                }),
+            )
+            .unwrap()
+        }
+
+        async fn execute(
+            &self,
+            _ctx: ToolContext,
+            _input: serde_json::Value,
+        ) -> Result<ToolResult> {
+            Ok(ToolResult::ok("never runs"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_declaring_an_unenforced_keyword_never_registers() {
+        // `schema`'s module doc promises this happens at registration. It used to happen
+        // only in the CLI's bootstrap sweep, which left the promise false for every other
+        // embedder -- and false at exactly the moment a policy reads the arguments.
+        let reg = registry();
+        let err = reg
+            .scoped(owner("acme.tool-grep"))
+            .register_tool(Arc::new(UnenforceableTool))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pattern"), "{err}");
+
+        assert!(
+            reg.tool("grep").await.is_none(),
+            "a refused registration must leave nothing behind"
+        );
+        assert!(reg.tool_names().await.is_empty());
     }
 
     #[tokio::test]

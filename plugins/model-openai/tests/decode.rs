@@ -43,6 +43,8 @@ async fn every_stream_ends_with_exactly_one_done() {
         "openai_usage_in_last_chunk.sse",
         "deepseek_reasoning.sse",
         "ollama_single_chunk.sse",
+        "no_index_split_arguments.sse",
+        "no_index_two_calls.sse",
         "truncated_args.sse",
     ] {
         let events = decode(name).await;
@@ -155,6 +157,40 @@ async fn a_dialect_without_an_index_still_yields_a_call() {
         usage.output_tokens > 0,
         "a zero would make max_total_tokens a limit that never trips"
     );
+}
+
+#[tokio::test]
+async fn a_repeated_id_without_an_index_is_one_call_not_three() {
+    // The guard that starts a new block on a "differing id" used to compare the provider's
+    // id against our freshly minted `ToolCallId`, which can never match by construction --
+    // `ids.rs` discards the provider's. So it fired on every fragment. A dialect that omits
+    // `index`, repeats the id and splits `arguments` decoded as three calls with
+    // unparseable pieces.
+    let events = decode("no_index_split_arguments.sse").await;
+    let (message, stop, _) = assembled(&events);
+    assert_eq!(stop, StopReason::ToolUse);
+    let calls = message.tool_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the fragments belong to one call: {calls:?}"
+    );
+    assert_eq!(calls[0].name, "search");
+    assert_eq!(calls[0].input, serde_json::json!({ "query": "TODO" }));
+}
+
+#[tokio::test]
+async fn differing_ids_without_an_index_open_separate_calls() {
+    // The other direction, and the reason the guard exists at all: two complete calls in a
+    // dialect with no `index` must not merge into one block.
+    let events = decode("no_index_two_calls.sse").await;
+    let (message, stop, _) = assembled(&events);
+    assert_eq!(stop, StopReason::ToolUse);
+    let calls = message.tool_calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].input, serde_json::json!({ "path": "a.txt" }));
+    assert_eq!(calls[1].input, serde_json::json!({ "path": "b.txt" }));
+    assert_ne!(calls[0].id, calls[1].id, "each call gets its own id");
 }
 
 #[tokio::test]

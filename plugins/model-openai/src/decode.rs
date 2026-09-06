@@ -41,6 +41,12 @@ pub struct StreamDecoder {
     blocks: Vec<Block>,
     /// Wire tool-call index -> our block index.
     tool_blocks: HashMap<usize, usize>,
+    /// Wire tool-call index -> the provider id last seen for that block.
+    ///
+    /// Our own [`ToolCallId`](rivet_core::id::ToolCallId) cannot stand in for this: the
+    /// provider's id is discarded at mint time (see [`crate::ids`]), so comparing the two
+    /// would always report a difference and every fragment would open a new block.
+    wire_ids: HashMap<usize, String>,
     text_block: Option<usize>,
     reasoning_block: Option<usize>,
     finish_reason: Option<String>,
@@ -57,6 +63,7 @@ impl StreamDecoder {
             ids,
             blocks: Vec::new(),
             tool_blocks: HashMap::new(),
+            wire_ids: HashMap::new(),
             text_block: None,
             reasoning_block: None,
             finish_reason: None,
@@ -149,12 +156,16 @@ impl StreamDecoder {
         let wire_index = call.index.unwrap_or(0);
         let mut block_index = self.tool_blocks.get(&wire_index).copied();
 
-        if let (Some(existing), Some(new_id)) = (block_index, call.id.as_deref())
-            && let Some(Block::Tool { id, .. }) = self.blocks.get(existing)
-            && format!("{id}") != new_id
+        if let (Some(_), Some(new_id)) = (block_index, call.id.as_deref())
             && call.index.is_none()
+            && self
+                .wire_ids
+                .get(&wire_index)
+                .is_some_and(|seen| seen != new_id)
         {
             // A second complete call in a dialect with no index: start a fresh block.
+            // A *repeated* id is the same call still arriving, so it must not split --
+            // that is the case the old check got wrong by comparing our minted id.
             block_index = None;
         }
 
@@ -175,6 +186,9 @@ impl StreamDecoder {
                     arguments: String::new(),
                 });
                 self.tool_blocks.insert(wire_index, index);
+                if let Some(wire_id) = call.id.as_deref() {
+                    self.wire_ids.insert(wire_index, wire_id.to_string());
+                }
                 events.push(StreamEvent::BlockStart {
                     index,
                     block: ContentBlock::ToolCall(ToolCall {

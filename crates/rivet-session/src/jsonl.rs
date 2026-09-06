@@ -92,6 +92,23 @@ impl JsonlSessionStore {
         let data = std::fs::read(path).map_err(|e| io_error(path, "read", &e))?;
         Ok(recover::scan(path, &data)?.events)
     }
+
+    /// Every event in a session, read without opening a handle or repairing a torn tail.
+    ///
+    /// The `SessionStore` trait's `read` deliberately goes through `handle()`, which
+    /// truncates a partial final line, because a caller that is about to *append* needs
+    /// the file sound first. Inspection is not that caller: `session show` should report
+    /// what is on disk, not quietly rewrite it on the way past. A torn tail is dropped
+    /// from the returned events exactly as `list` drops it, and left in the file.
+    ///
+    /// # Errors
+    /// Storage failures, and a log whose bytes cannot be scanned.
+    pub async fn read_all_readonly(&self, id: SessionId) -> rivet_core::Result<Vec<StoredEvent>> {
+        let path = layout::log_path(&self.root, id);
+        tokio::task::spawn_blocking(move || Self::read_log_readonly(&path))
+            .await
+            .map_err(join_failed)?
+    }
 }
 
 /// Open an existing log, truncating a partial final line if a crash left one.

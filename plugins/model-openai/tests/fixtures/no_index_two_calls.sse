@@ -1,0 +1,9 @@
+: Written by hand. The other half of the no-`index` case: two complete calls with
+: different ids, which must not merge into one block.
+data: {"id":"chatcmpl-two","object":"chat.completion.chunk","created":1730000010,"model":"local","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_two_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-two","object":"chat.completion.chunk","created":1730000010,"model":"local","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_two_2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"b.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-two","object":"chat.completion.chunk","created":1730000010,"model":"local","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]

@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 
 use rivet_core::agent::{AgentSpec, LimitKind, RunLimits, RunSummary, StopReason};
 use rivet_core::capability::PermissionSet;
-use rivet_core::context::ContextRequest;
+use rivet_core::context::{ContextRequest, estimate_tokens};
 use rivet_core::error::Error;
 use rivet_core::event::{AgentEvent, Event, EventBus, EventEnvelope};
 use rivet_core::id::{RunId, SessionId};
@@ -57,7 +57,7 @@ use rivet_core::model::{
 };
 use rivet_core::retry::{RetryDecision, RetryPolicy};
 use rivet_core::session::{SessionEvent, SessionState, SessionStore};
-use rivet_core::tool::{ToolCall, ToolResult};
+use rivet_core::tool::{ToolCall, ToolResult, ToolSpec};
 use rivet_core::workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
@@ -263,7 +263,7 @@ impl AgentLoop {
     ) -> rivet_core::Result<StopReason> {
         let limits = cfg.agent.limits;
         loop {
-            if let Some(stop) = clock.stopped_by(cfg, tally, limits) {
+            if let Some(stop) = clock.stopped_by(tally, limits) {
                 return Ok(stop);
             }
 
@@ -349,6 +349,38 @@ impl AgentLoop {
         turn: u32,
     ) -> rivet_core::Result<Result<ModelRequest, StopReason>> {
         let limits = cfg.agent.limits;
+
+        // Tools first, because their schemas are part of every request and therefore part
+        // of the budget the assembler has to pack into. Assembling against the *whole*
+        // window and only then adding schemas is how a session lands a few hundred tokens
+        // under the limit, gets told it fits, and is refused by the `count_tokens`
+        // re-check below -- deterministically, so `resume` would do it again.
+        let mut tools = Vec::new();
+        for name in self.registry.tool_names().await {
+            // Pipeline step 2 applied ahead of time: a tool outside the agent's scope is
+            // never offered, so the model does not spend a turn being refused.
+            if !cfg.agent.allows_tool(&name) {
+                continue;
+            }
+            if let Some(tool) = self.registry.tool(&name).await {
+                tools.push(tool.spec());
+            }
+        }
+        let tool_tokens = estimate_tool_tokens(&tools);
+
+        // A window that the tool schemas alone fill leaves nothing to say, and trimming
+        // history cannot recover it -- the tools are not negotiable.
+        let Some(budget_tokens) = limits.max_context_tokens.checked_sub(tool_tokens) else {
+            tracing::warn!(
+                tool_tokens,
+                budget = limits.max_context_tokens,
+                "the tool schemas alone exceed the context budget"
+            );
+            return Ok(Err(StopReason::LimitReached {
+                limit: LimitKind::ContextSize,
+            }));
+        };
+
         let context_request = ContextRequest {
             session_id: cfg.session_id,
             agent_id: cfg.agent.id,
@@ -356,7 +388,7 @@ impl AgentLoop {
             job_id: None,
             workspace: cfg.workspace.clone(),
             turn: turn.saturating_sub(1),
-            budget_tokens: limits.max_context_tokens,
+            budget_tokens,
         };
         // A checkpoint projects its summary into the first message; losing it to a trim
         // would be amnesia about everything the checkpoint folded away.
@@ -375,18 +407,6 @@ impl AgentLoop {
                 }));
             }
         };
-
-        let mut tools = Vec::new();
-        for name in self.registry.tool_names().await {
-            // Pipeline step 2 applied ahead of time: a tool outside the agent's scope is
-            // never offered, so the model does not spend a turn being refused.
-            if !cfg.agent.allows_tool(&name) {
-                continue;
-            }
-            if let Some(tool) = self.registry.tool(&name).await {
-                tools.push(tool.spec());
-            }
-        }
 
         let request = ModelRequest {
             model: cfg.agent.model.clone(),
@@ -766,7 +786,7 @@ impl Watchdog {
     }
 
     /// The turn-boundary check for all five limits.
-    fn stopped_by(&self, cfg: &RunConfig, tally: &Tally, limits: RunLimits) -> Option<StopReason> {
+    fn stopped_by(&self, tally: &Tally, limits: RunLimits) -> Option<StopReason> {
         if self.effective.is_cancelled() {
             return Some(self.cancellation_reason());
         }
@@ -789,9 +809,22 @@ impl Watchdog {
         }
         // `max_context_tokens` is checked where it can actually be measured: in
         // `build_request`, against the assembled request.
-        let _ = cfg;
         None
     }
+}
+
+/// What the tool schemas will cost on the wire.
+///
+/// Deliberately the same arithmetic as [`Model::count_tokens`]'s default body. A provider
+/// with a real tokenizer will disagree, which is why the re-check after assembly stays --
+/// this only stops the two *estimates* from contradicting each other.
+fn estimate_tool_tokens(tools: &[ToolSpec]) -> u32 {
+    let mut total: u32 = 0;
+    for tool in tools {
+        total = total.saturating_add(estimate_tokens(&tool.description));
+        total = total.saturating_add(estimate_tokens(&tool.input_schema.to_string()));
+    }
+    total
 }
 
 /// Write an assembled request to [`DUMP_REQUESTS_ENV`], if an operator asked for it.

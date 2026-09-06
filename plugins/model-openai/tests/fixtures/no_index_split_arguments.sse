@@ -1,0 +1,14 @@
+: Written by hand. A no-`index` dialect that nevertheless splits `arguments` across
+: chunks and repeats the same `id` on each one. The guard that opens a new block on a
+: "differing id" must compare against the id seen on the wire: comparing against our own
+: minted ToolCallId never matches, so every fragment would start a fresh call and the
+: arguments would arrive as three unparseable pieces.
+data: {"id":"chatcmpl-split","object":"chat.completion.chunk","created":1730000009,"model":"local","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_split_1","type":"function","function":{"name":"search","arguments":"{\"query\":"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-split","object":"chat.completion.chunk","created":1730000009,"model":"local","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_split_1","type":"function","function":{"arguments":"\"TO"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-split","object":"chat.completion.chunk","created":1730000009,"model":"local","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_split_1","type":"function","function":{"arguments":"DO\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-split","object":"chat.completion.chunk","created":1730000009,"model":"local","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]

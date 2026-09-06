@@ -141,14 +141,16 @@ rivet "list the files here and explain what this project does"
 - [x] tool call → 파일 읽기 → 모델이 결과를 사용
       (`rivet-cli/tests/e2e.rs::a_prompt_runs_a_tool_and_the_model_sees_its_result`:
       두 번째 요청의 메시지 배열에 파일 내용이 담긴 tool result가 있음을 단언)
-- [x] Ctrl-C가 5초 안에 in-flight 요청과 도구를 정지 — 오프라인 검증분만[^ctrlc]
+- [x] Ctrl-C가 5초 안에 in-flight 요청과 도구를 정지
+      (`rivet-cli/tests/e2e.rs::ctrl_c_stops_an_in_flight_tool_and_exits_130` — 실제
+      SIGINT를 받은 서브프로세스가 130으로, 신호 시점부터 5초 안에 종료함을 단언)
 - [x] `rivet resume <session>`이 로그 replay로 이어감
       (`rivet-runtime/tests/session_recovery.rs`, `rivet-cli/tests/e2e.rs`)
 - [x] 5개 한도가 각각 발동하는 테스트 존재
       (`rivet-runtime/tests/agent_loop.rs`의 `the_*_limit_trips` 5개, 각각 어느
       `LimitKind`인지까지 단언)
 - [x] provider 응답 픽스처 기반 offline 테스트 통과
-      (`plugins/model-openai/tests/fixtures/*.sse` 9개 + 디코드·인코딩·에러 분류·루프백)
+      (`plugins/model-openai/tests/fixtures/*.sse` 11개 + 디코드·인코딩·에러 분류·루프백)
 - [x] 심볼릭 링크 탈출 시도가 차단됨 (1.6b)
       (`rivet-runtime/tests/fsguard.rs`, unix 한정 — windows는 미검증)
 - [x] `kill -9` 후 재개 시 미완 tool call이 합성 결과로 닫힘
@@ -157,12 +159,8 @@ rivet "list the files here and explain what this project does"
 
 [^live]: 이 환경에 API 키가 없어 실제 왕복을 **수행하지 못했다.** 충족했다고 표시하지
     않는다. 오프라인 대체물은 (a) 실제 `reqwest` 경로를 지나는 루프백 SSE 서버 테스트,
-    (b) 9개 픽스처 디코드 테스트, (c) 서브프로세스 e2e다. 수동 검증 절차는
+    (b) 11개 픽스처 디코드 테스트, (c) 서브프로세스 e2e다. 수동 검증 절차는
     `HANDOFF.md`에 있다.
-
-[^ctrlc]: 취소 메커니즘 자체(스트림 drop → 서버가 연결 종료를 관측, 협조 취소, 유예 초과
-    포기, 취소된 로그의 재개 가능성)는 오프라인으로 검증했다. **터미널에서 사람이 누르는
-    실제 Ctrl-C는 수동 검증 대기**이며 `HANDOFF.md`에 있다.
 
 ---
 
@@ -362,7 +360,7 @@ rivet job list
 | Phase | 상태 | 게이트 |
 |---|---|---|
 | 0 Repository | ✅ 완료 | 135 passed · clippy 0 · 리뷰 2회전 반영 완료 |
-| 1 Minimal Agent | ✅ 완료 (1건 수동 검증 대기) | 379 passed (+244) · clippy 0 · `cargo doc` 0 · DoD 8개 중 7개 충족, 1번(실제 provider 왕복)은 API 키 부재로 미검증 |
+| 1 Minimal Agent | ✅ 완료 (1건 수동 검증 대기) | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 중 7개 충족, 1번(실제 provider 왕복)은 API 키 부재로 미검증 · build 리뷰 지적 11건 반영 |
 | 2 Plugin | ⬜ | 롤백 무결성 |
 | 3 Event | ⬜ | TUI가 런타임 타입 미참조 |
 | 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |

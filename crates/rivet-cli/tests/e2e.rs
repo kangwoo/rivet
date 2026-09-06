@@ -6,7 +6,7 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use support::{Provider, Workspace, sse_text, sse_tool_call, tool_results};
 
@@ -297,5 +297,88 @@ async fn a_killed_run_is_closed_with_a_synthetic_result_and_resumes() {
         messages[call_index + 1]["role"],
         "tool",
         "the result has to come straight after the call, or the provider rejects it"
+    );
+}
+
+/// Ctrl-C at a terminal: the one part of the cancellation story that only a real signal
+/// can exercise.
+///
+/// The offline tests cover everything downstream of the run token — a dropped stream
+/// disconnects the request, a cooperative tool stops, an uncooperative one is abandoned
+/// inside the budget. What they cannot reach is `signals::install` actually wiring
+/// `tokio::signal::ctrl_c()` to `cancel.cancel()`, and the process then leaving with 130
+/// instead of having to be killed.
+///
+/// Parked on a named pipe like the SIGKILL test above, so the signal is guaranteed to
+/// arrive while a tool is in flight — and an uncooperative tool at that, which is the
+/// harder of the two shutdown paths.
+#[cfg(unix)]
+#[tokio::test]
+async fn ctrl_c_stops_an_in_flight_tool_and_exits_130() {
+    let provider = Provider::start(vec![
+        sse_tool_call("read_file", &serde_json::json!({ "path": "pipe" })),
+        sse_text("never reached: the run is cancelled before a second turn"),
+    ])
+    .await;
+    let workspace = Workspace::new(&provider.base_url);
+
+    let made = std::process::Command::new("mkfifo")
+        .arg(workspace.path().join("pipe"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+
+    let mut child = workspace
+        .command(&["read the pipe"])
+        .spawn()
+        .expect("spawn rivet");
+    let pid = child.id().expect("the child must still be running");
+
+    assert!(
+        workspace
+            .wait_for_event("tool.called", Duration::from_secs(10))
+            .await,
+        "the run never reached the tool: {:?}",
+        workspace.session_events()
+    );
+    assert!(
+        !workspace
+            .session_events()
+            .contains(&"tool.completed".to_string()),
+        "the tool must still be blocked on the pipe when the signal lands"
+    );
+
+    // `kill -INT` rather than `libc::kill`: this workspace forbids `unsafe_code`.
+    let signalled = std::process::Command::new("kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .expect("run kill");
+    assert!(signalled.success(), "could not signal the child");
+
+    let sent_at = Instant::now();
+    let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("SIGINT must end the run; a hang here means the token is not wired")
+        .expect("wait for the child");
+    let took = sent_at.elapsed();
+
+    assert_eq!(
+        status.code(),
+        Some(130),
+        "a cancelled run exits 128 + SIGINT, so a script can tell it from a failure"
+    );
+    // DoD 3's actual number, measured from the signal rather than reasoned about.
+    assert!(
+        took < Duration::from_secs(5),
+        "the run took {took:?} to stop after Ctrl-C; the budget is 5s"
+    );
+
+    // The log is the record: the run recorded that it stopped rather than vanishing.
+    let events = workspace.session_events();
+    assert!(events.contains(&"tool.called".to_string()), "{events:?}");
+    assert!(
+        events.iter().any(|e| e == "run.completed"),
+        "a cancelled run still closes its own log: {events:?}"
     );
 }

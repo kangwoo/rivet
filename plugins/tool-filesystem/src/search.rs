@@ -205,9 +205,17 @@ fn scan(
             continue;
         }
 
-        let Ok(bytes) = std::fs::read(&found.path) else {
+        // Through the guard, not around it: `walk` classified this entry with
+        // `symlink_metadata`, and between that call and this read the entry can be
+        // swapped for a link pointing out of the workspace. `open_read_blocking` re-checks
+        // after the open, which is the whole point of `fsguard`.
+        let Ok((mut file, _)) = fsguard::open_read_blocking(ctx.workspace(), &found.path) else {
             continue;
         };
+        let mut bytes = Vec::new();
+        if std::io::Read::read_to_end(&mut file, &mut bytes).is_err() {
+            continue;
+        }
         if bytes.iter().take(8_192).any(|b| *b == 0) {
             continue;
         }

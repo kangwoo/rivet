@@ -1,7 +1,5 @@
 //! `rivet session list | show | fork`.
 
-use std::sync::Arc;
-
 use rivet_core::error::Error;
 use rivet_core::id::SessionId;
 use rivet_core::session::{SessionState, SessionStore};
@@ -43,8 +41,11 @@ pub async fn list(config: &Config) -> rivet_core::Result<()> {
 /// A malformed id, or storage failures.
 pub async fn show(config: &Config, id: &str, as_json: bool) -> rivet_core::Result<()> {
     let session_id = parse(id)?;
-    let store: Arc<dyn SessionStore> = Arc::new(JsonlSessionStore::new(&config.sessions_dir));
-    let events = rivet_runtime::session_recovery::read_all(store.as_ref(), session_id).await?;
+    // Deliberately not the `SessionStore::read` path: that one repairs a torn tail on the
+    // way past, and inspecting a session should not rewrite it. `list` already holds this
+    // line; `show` is the same kind of read.
+    let store = JsonlSessionStore::new(&config.sessions_dir);
+    let events = store.read_all_readonly(session_id).await?;
 
     if as_json {
         for event in &events {

@@ -130,13 +130,28 @@ pub async fn open_read(
     ws: &Workspace,
     candidate: &Path,
 ) -> rivet_core::Result<(tokio::fs::File, PathBuf)> {
-    let (parent, name) = resolve_file_parent(ws, candidate)?;
-    let target = parent.join(name);
     let ws = ws.clone();
-    let (file, path) = tokio::task::spawn_blocking(move || open_checked(&ws, &target))
+    let candidate = candidate.to_path_buf();
+    let (file, path) = tokio::task::spawn_blocking(move || open_read_blocking(&ws, &candidate))
         .await
         .map_err(join_failed)??;
     Ok((tokio::fs::File::from_std(file), path))
+}
+
+/// [`open_read`] for a caller that is already on a blocking thread.
+///
+/// A tool that walks a tree does its own `spawn_blocking` and cannot await inside it.
+/// Without this it would fall back to a plain `std::fs::read`, which is exactly the
+/// re-check this module's doc says every caller performs.
+///
+/// # Errors
+/// As [`open_read`].
+pub fn open_read_blocking(
+    ws: &Workspace,
+    candidate: &Path,
+) -> rivet_core::Result<(std::fs::File, PathBuf)> {
+    let (parent, name) = resolve_file_parent(ws, candidate)?;
+    open_checked(ws, &parent.join(name))
 }
 
 /// Blocking half of [`open_read`]: the `O_NOFOLLOW` open and the identity re-check.

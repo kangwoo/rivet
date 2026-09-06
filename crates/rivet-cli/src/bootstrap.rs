@@ -52,8 +52,9 @@ impl Loaded {
 ///
 /// # Errors
 /// Any plugin failing to load, after that plugin's partial registrations are rolled back.
-/// A tool whose schema uses a keyword the runtime does not enforce also fails here — see
-/// [`rivet_runtime::schema::validate_spec`].
+/// That includes a tool whose schema uses a keyword the runtime does not enforce:
+/// [`rivet_runtime::schema::validate_spec`] runs inside `register_tool`, so such a tool
+/// fails its own registration and the plugin carrying it is rolled back like any other.
 pub async fn load(config: &Config) -> rivet_core::Result<Loaded> {
     let bus = BroadcastBus::new();
     let registry = Registry::new(bus.clone());
@@ -84,22 +85,17 @@ pub async fn load(config: &Config) -> rivet_core::Result<Loaded> {
             Ok(handle) => registered.extend(handle.registered),
             Err(error) => {
                 // A plugin that failed halfway must leave nothing behind. This is Phase
-                // 2's rollback requirement, and it is free to honor now.
+                // 2's rollback requirement, and it is free to honor now. The token goes
+                // with it: nobody downstream will ever call `Loaded::shutdown` for a load
+                // that returned `Err`, so any background work an earlier plugin armed
+                // would outlive the failure.
                 let rolled_back = registry.unregister_all(instance_id).await;
+                shutdown.cancel();
                 return Err(Error::plugin(format!(
                     "plugin `{id}` failed to load (rolled back {}): {error}",
                     rolled_back.len()
                 )));
             }
-        }
-    }
-
-    // The schema vocabulary is closed on purpose: a tool advertising a constraint the
-    // validator does not enforce is worse than one that never claimed it. Checked once,
-    // at registration, so it can never be a surprise at call time.
-    for name in registry.tool_names().await {
-        if let Some(tool) = registry.tool(&name).await {
-            rivet_runtime::schema::validate_spec(&tool.spec())?;
         }
     }
 

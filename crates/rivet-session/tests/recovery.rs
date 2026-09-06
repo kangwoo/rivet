@@ -57,6 +57,36 @@ async fn a_half_written_final_line_is_truncated_away() {
 }
 
 #[tokio::test]
+async fn inspecting_a_torn_log_does_not_rewrite_it() {
+    // `read` repairs on the way past, because a caller about to *append* needs the file
+    // sound first. Inspection is not that caller: `rivet session show` reports what is on
+    // disk. `list` already held this line and `show` did not, which is the asymmetry.
+    let (dir, id) = crashed_log(|mut bytes| {
+        bytes.extend_from_slice(br#"{"seq":4,"at":"2026-09"#);
+        bytes
+    })
+    .await;
+
+    let root = dir.path().join("sessions");
+    let store = JsonlSessionStore::new(&root);
+    let before = support::log_bytes(&store, id);
+
+    let events = store.read_all_readonly(id).await.unwrap();
+    assert_eq!(events.len(), 3, "the torn line is not reported");
+
+    let after = support::log_bytes(&store, id);
+    assert_eq!(before, after, "inspection must leave the bytes alone");
+
+    // The repairing path is still there for the caller that needs it.
+    let events = store.read(id, 1, 100).await.unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(
+        support::log_bytes(&store, id).len() < before.len(),
+        "`read` still repairs"
+    );
+}
+
+#[tokio::test]
 async fn a_torn_line_that_happens_to_end_in_a_newline_is_also_repaired() {
     let (dir, id) = crashed_log(|mut bytes| {
         bytes.extend_from_slice(b"{\"seq\":4,\"at\"\n");

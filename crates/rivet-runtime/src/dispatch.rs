@@ -472,16 +472,21 @@ async fn sleep_maybe(duration: Option<Duration>) {
 /// The truncation record is what lets a UI offer the full output later;
 /// `artifact_ref` stays `None` until payload offloading lands.
 fn truncate(mut result: ToolResult, max_bytes: u64) -> ToolResult {
+    const MARKER: &str = "\n… [output truncated]";
     let original = result.content.len() as u64;
     if original <= max_bytes {
         return result;
     }
-    let mut end = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    // The marker is part of what the caller receives, so it comes out of the budget
+    // rather than sitting on top of it. Otherwise `max_output_bytes` is not a bound and
+    // `retained_bytes` describes something other than what is in `content`.
+    let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    let mut end = cap.saturating_sub(MARKER.len());
     while end > 0 && !result.content.is_char_boundary(end) {
         end -= 1;
     }
     result.content.truncate(end);
-    result.content.push_str("\n… [output truncated]");
+    result.content.push_str(MARKER);
     result.truncated = Some(Truncation {
         original_bytes: original,
         retained_bytes: end as u64,
@@ -581,6 +586,26 @@ mod tests {
         assert_eq!(truncation.original_bytes, content.len() as u64);
         assert!(truncation.retained_bytes <= 50);
         assert!(result.content.contains("output truncated"));
+    }
+
+    #[test]
+    fn truncation_stays_inside_max_output_bytes() {
+        // The marker is part of what the caller receives, so a cap that excludes it is
+        // not a cap. `retained_bytes` has to describe `content`, marker and all.
+        for cap in [40u64, 64, 200] {
+            let result = truncate(ToolResult::ok("x".repeat(1_000)), cap);
+            assert!(
+                result.content.len() as u64 <= cap,
+                "cap {cap}: content is {} bytes",
+                result.content.len()
+            );
+            let truncation = result.truncated.expect("truncated");
+            assert_eq!(
+                truncation.retained_bytes,
+                (result.content.len() - "\n… [output truncated]".len()) as u64,
+                "cap {cap}: retained_bytes must describe the content actually returned"
+            );
+        }
     }
 
     #[test]
