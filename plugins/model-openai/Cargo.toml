@@ -17,6 +17,16 @@ tokio = { workspace = true }
 reqwest.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true
+jiff.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# `net` is not in the workspace tokio feature list; the loopback tests below need a
+# real listener and must not depend on another crate's features unifying it in.
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
+tempfile.workspace = true
+pretty_assertions.workspace = true
 
 [lints]
 workspace = true

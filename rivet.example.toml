@@ -22,6 +22,12 @@ max_consecutive_tool_errors = 5
 # code execution paths: write access to git config is shell access.
 deny = [".env", ".git/config", ".ssh", "**/credentials.json", "**/*.pem"]
 
+# Phase 1 implements the first two. The rest are listed because this file describes where
+# the project is going; they warn and are skipped until the phase that provides them. An id
+# in neither group is a typo and fails at startup.
+#
+# `rivet.context-builtin` (the system-prompt and workspace providers) is always registered:
+# the loop cannot assemble a request without it, so it is not an option to switch off.
 [plugins]
 enabled = [
     "rivet.model-openai",
@@ -36,6 +42,10 @@ enabled = [
 base_url = "https://api.deepseek.com/v1"
 api_key_env = "DEEPSEEK_API_KEY"        # the key itself never goes in this file
 
+# In Phase 1 a profile narrows the agent's *tool scope* -- which tools are registered and
+# therefore offered to the model. That is pipeline step 2, not policy enforcement: the
+# policy chain, approvals and sandboxing arrive in Phase 4. `readonly` really does mean the
+# model is never given `write_file`; it does not yet mean a policy would stop it.
 [policy]
 profile = "developer"    # developer | readonly | reviewer | ci | production
 
@@ -51,6 +61,11 @@ max_concurrency = 1      # see architecture.md open question §11-5
 
 # A reviewer is a normal agent with a different model and no write tools.
 # A reviewer that can edit the code is not a reviewer.
+#
+# Phase 1 parses this section and reports it in `rivet doctor`, but has no command-line
+# surface for selecting a named agent, so nothing here takes effect yet. Note that
+# `context_providers` names a `task` and a `git` provider that do not exist until later
+# phases; Phase 1 registers `system` and `workspace`.
 [agents.reviewer]
 model             = "anthropic/claude-sonnet-5"
 tools             = ["read_file", "list_dir", "git_diff", "git_log"]

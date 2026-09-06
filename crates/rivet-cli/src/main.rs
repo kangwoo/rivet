@@ -3,10 +3,22 @@
 //! The CLI is a *client of the runtime*, on exactly the same footing as the TUI: it
 //! subscribes to events and renders them. Nothing here reaches into the agent loop.
 //!
-//! Phase 0 ships the command surface only, so the shape of the UX is reviewable before
-//! the runtime exists to serve it.
+//! Phase 0 shipped the command surface; Phase 1 connects it to a runtime that exists. The
+//! surface itself is unchanged, because it was reviewed as the shape of the UX.
+
+mod bootstrap;
+mod config;
+mod doctor;
+mod exit;
+mod render;
+mod run;
+mod session_cmd;
+mod signals;
 
 use clap::{Parser, Subcommand};
+
+use crate::config::{Config, Overrides};
+use crate::run::Output;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -25,10 +37,16 @@ struct Cli {
     headless: bool,
 
     /// Emit newline-delimited JSON events on stdout instead of rendering.
+    ///
+    /// For observation only: the event bus is lossy by design, so this stream cannot
+    /// reconstruct a session. Use `rivet session show --json` for that.
     #[arg(long, global = true, conflicts_with = "headless")]
     jsonl: bool,
 
     /// Override the configured policy profile.
+    ///
+    /// In Phase 1 a profile narrows which tools the agent is offered. It is not policy
+    /// enforcement; that arrives in Phase 4.
     #[arg(long, global = true, value_name = "PROFILE")]
     profile: Option<String>,
 
@@ -69,6 +87,9 @@ enum SessionCommand {
     List,
     Show {
         id: String,
+        /// Print the durable log as JSON, one event per line.
+        #[arg(long)]
+        json: bool,
     },
     /// Branch a session at an event boundary.
     Fork {
@@ -114,13 +135,140 @@ enum PluginCommand {
     },
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    eprintln!(
-        "rivet {}: command surface only; the runtime lands in Phase 1. \
-         Parsed: {cli:?}",
-        env!("CARGO_PKG_VERSION")
-    );
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("rivet: could not start the async runtime: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let code = runtime.block_on(dispatch(cli));
+    std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+async fn dispatch(cli: Cli) -> i32 {
+    let overrides = Overrides {
+        config_path: cli.config.as_ref().map(std::path::PathBuf::from),
+        profile: cli.profile.clone(),
+        headless: cli.headless,
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("rivet: could not read the working directory: {error}");
+            return exit::CONFIG;
+        }
+    };
+
+    // Every configuration problem is exit code 2, so a script can tell "I set this up
+    // wrong" apart from "the agent could not do it".
+    let config = match Config::load(&cwd, &overrides) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("rivet: {error}");
+            return exit::CONFIG;
+        }
+    };
+
+    let output = if cli.jsonl {
+        Output::Jsonl
+    } else {
+        Output::Human
+    };
+
+    match (cli.command, cli.prompt) {
+        (Some(Command::Run { prompt, task }), _) => {
+            if task {
+                eprintln!("rivet: `--task` needs the task runtime, which lands in Phase 5");
+                return exit::CONFIG;
+            }
+            finish(run::start(&config, &prompt, output).await)
+        }
+        (None, Some(prompt)) => finish(run::start(&config, &prompt, output).await),
+        (Some(Command::Resume { session }), _) => {
+            match run::resume(&config, &session, output).await {
+                Ok(Some(summary)) => exit::for_stop(&summary.stop),
+                // Nothing to resume; the reason has already been printed.
+                Ok(None) => exit::CONFIG,
+                Err(error) => report(&error),
+            }
+        }
+        (Some(Command::Session(command)), _) => {
+            let result = match command {
+                SessionCommand::List => session_cmd::list(&config).await,
+                SessionCommand::Show { id, json } => session_cmd::show(&config, &id, json).await,
+                SessionCommand::Fork { id, at_seq } => {
+                    session_cmd::fork(&config, &id, at_seq).await
+                }
+            };
+            match result {
+                Ok(()) => exit::OK,
+                Err(error) => report(&error),
+            }
+        }
+        (Some(Command::Doctor), _) => match doctor::run(&config).await {
+            Ok(true) => exit::OK,
+            Ok(false) => exit::CONFIG,
+            Err(error) => report(&error),
+        },
+        (Some(Command::Plugin(PluginCommand::List)), _) => match bootstrap::load(&config).await {
+            Ok(loaded) => {
+                for entry in &loaded.registered {
+                    println!("{entry}");
+                }
+                for id in &loaded.deferred {
+                    println!("{id} (later phase)");
+                }
+                loaded.shutdown();
+                exit::OK
+            }
+            Err(error) => report(&error),
+        },
+        (Some(Command::Plugin(_)), _) => {
+            eprintln!("rivet: plugin scaffolding and inspection land in Phase 2");
+            exit::CONFIG
+        }
+        (Some(Command::Task(_)), _) => {
+            eprintln!("rivet: the task runtime lands in Phase 5");
+            exit::CONFIG
+        }
+        (None, None) => {
+            eprintln!("rivet: nothing to do. Try `rivet \"explain this repo\"` or `rivet --help`.");
+            exit::CONFIG
+        }
+    }
+}
+
+fn finish(result: rivet_core::Result<rivet_core::agent::RunSummary>) -> i32 {
+    match result {
+        Ok(summary) => exit::for_stop(&summary.stop),
+        Err(error) => report(&error),
+    }
+}
+
+/// Print an error and pick its exit code.
+fn report(error: &rivet_core::Error) -> i32 {
+    eprintln!("rivet: {error}");
+    match error.kind() {
+        // Setup problems, told apart from run failures so a script can react.
+        rivet_core::error::ErrorKind::InvalidArgument | rivet_core::error::ErrorKind::NotFound => {
+            exit::CONFIG
+        }
+        rivet_core::error::ErrorKind::Cancelled => exit::CANCELLED,
+        rivet_core::error::ErrorKind::PolicyDenied
+        | rivet_core::error::ErrorKind::ApprovalDenied => exit::POLICY,
+        _ => exit::FAILED,
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +305,17 @@ mod tests {
                 verdict: Verdict::Approve,
                 ..
             }))
+        ));
+    }
+
+    #[test]
+    fn session_show_takes_a_json_flag() {
+        // `--jsonl` observes the bus; this reads the durable log. They are different
+        // things and the surface should not blur them.
+        let cli = Cli::parse_from(["rivet", "session", "show", "ses_1", "--json"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session(SessionCommand::Show { json: true, .. }))
         ));
     }
 }

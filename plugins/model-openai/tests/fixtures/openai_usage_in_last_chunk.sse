@@ -1,0 +1,11 @@
+: Recorded from api.openai.com with stream_options={"include_usage":true}.
+: The final chunk before the sentinel carries an empty `choices` array and the usage
+: block. A decoder that only reads usage from a chunk with choices reports zeros.
+data: {"id":"chatcmpl-D1","object":"chat.completion.chunk","created":1730000003,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-D1","object":"chat.completion.chunk","created":1730000003,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-D1","object":"chat.completion.chunk","created":1730000003,"model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":37,"total_tokens":1237,"prompt_tokens_details":{"cached_tokens":1024}}}
+
+data: [DONE]
+

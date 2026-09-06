@@ -1,0 +1,10 @@
+: Recorded from api.openai.com with max_tokens set low enough to cut a tool call in
+: half. finish_reason is "length" and the arguments JSON simply stops.
+data: {"id":"chatcmpl-E1","object":"chat.completion.chunk","created":1730000006,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_trunc","type":"function","function":{"name":"write_file","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-E1","object":"chat.completion.chunk","created":1730000006,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\": \"src/li"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-E1","object":"chat.completion.chunk","created":1730000006,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+

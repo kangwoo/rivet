@@ -1,0 +1,6 @@
+: Observed from an OpenAI-compatible gateway: headers say 200, then the failure arrives
+: inside the body. The status code is gone by then, so `type` is the only classifier.
+data: {"id":"chatcmpl-F1","object":"chat.completion.chunk","created":1730000007,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Starting"},"finish_reason":null}]}
+
+data: {"error":{"message":"upstream provider is overloaded","type":"server_error","code":null}}
+

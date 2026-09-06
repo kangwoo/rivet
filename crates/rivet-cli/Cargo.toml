@@ -15,14 +15,27 @@ path = "src/main.rs"
 [dependencies]
 rivet-core.workspace = true
 rivet-runtime.workspace = true
+rivet-session.workspace = true
 rivet-tui.workspace = true
+rivet-model-openai.workspace = true
+rivet-tool-filesystem.workspace = true
+async-trait.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
+tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# `net` is not in the workspace tokio feature list; the end-to-end tests stand up a
+# loopback SSE server and must not rely on another crate's features unifying it in.
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
+tempfile.workspace = true
+pretty_assertions.workspace = true
 
 [lints]
 workspace = true

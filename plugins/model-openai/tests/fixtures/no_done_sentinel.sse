@@ -1,0 +1,6 @@
+: A connection that died mid-answer: text deltas, then nothing. No finish_reason and no
+: [DONE]. Reporting this as a complete answer is the failure this fixture exists to stop.
+data: {"id":"chatcmpl-G1","object":"chat.completion.chunk","created":1730000008,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"The answer is"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-G1","object":"chat.completion.chunk","created":1730000008,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":" partially"},"finish_reason":null}]}
+

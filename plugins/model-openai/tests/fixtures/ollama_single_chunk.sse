@@ -1,0 +1,11 @@
+: Written by hand from the Ollama OpenAI-compatibility docs
+: (https://github.com/ollama/ollama/blob/main/docs/openai.md): the endpoint emits a
+: complete tool call in one chunk, omits the `index` field, and reports no `usage`.
+: A decoder that requires `index` drops the call; one that leaves usage at zero turns
+: max_total_tokens into a limit that never trips.
+data: {"id":"chatcmpl-ollama","object":"chat.completion.chunk","created":1730000005,"model":"qwen2.5-coder","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_ollama_1","type":"function","function":{"name":"search","arguments":"{\"query\":\"TODO\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ollama","object":"chat.completion.chunk","created":1730000005,"model":"qwen2.5-coder","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

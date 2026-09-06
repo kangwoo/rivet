@@ -1,0 +1,16 @@
+: Recorded from api.deepseek.com /v1/chat/completions, deepseek-reasoner.
+: Two dialect facts live here. (1) reasoning arrives as `reasoning_content`, a field the
+: OpenAI schema does not have. (2) the finish_reason is "stop" even though the message
+: carries a tool call -- trusting it ends the turn without ever running the tool.
+data: {"id":"ds-1","object":"chat.completion.chunk","created":1730000004,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"The user wants the file list. "},"finish_reason":null}]}
+
+data: {"id":"ds-1","object":"chat.completion.chunk","created":1730000004,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"reasoning_content":"list_dir is the right tool."},"finish_reason":null}]}
+
+data: {"id":"ds-1","object":"chat.completion.chunk","created":1730000004,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"content":"Let me look."},"finish_reason":null}]}
+
+data: {"id":"ds-1","object":"chat.completion.chunk","created":1730000004,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ds_1","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"ds-1","object":"chat.completion.chunk","created":1730000004,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":900,"completion_tokens":64,"total_tokens":964}}
+
+data: [DONE]
+

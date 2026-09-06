@@ -14,13 +14,27 @@ async-trait.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `request_digest` lands in a durable log, so the hash has to be stable across builds and
+# machines. `DefaultHasher` does not promise that.
+sha2.workspace = true
 tokio = { workspace = true }
 tokio-util.workspace = true
 tracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# One constant, `O_NOFOLLOW`. `OpenOptionsExt::custom_flags` is a safe function, so this
+# does not need `unsafe` and does not violate the workspace's `unsafe_code = "forbid"`.
+libc.workspace = true
+
 [dev-dependencies]
+# The loop's tests drive a real session store and decode through the real adapter, so a
+# passing test means those paths work together rather than that a stub agrees with itself.
+rivet-session.workspace = true
+rivet-model-openai.workspace = true
 futures-util.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+pretty_assertions.workspace = true
 
 [lints]
 workspace = true

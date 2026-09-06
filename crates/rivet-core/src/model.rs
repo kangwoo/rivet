@@ -365,7 +365,11 @@ pub trait Model: Send + Sync + fmt::Debug {
     /// Two earlier versions of this were wrong in instructive ways: one summed only
     /// `Message::text`, reporting a 200 KB tool result as zero tokens; the next divided
     /// total bytes by four, undercounting Korean by 2-4x. Both made the budget
-    /// meaningless in exactly the runs it exists to protect.
+    /// meaningless in exactly the runs it exists to protect. The second fix landed on
+    /// `Message::estimated_tokens` but left this body on `billable_len() / 4`, so the
+    /// assembler's budget and this re-check disagreed by 2-4x on CJK text -- the very
+    /// failure that was supposed to have been repaired. `tests::count_tokens_does_not_undercount_cjk`
+    /// pins it now.
     ///
     /// It is still an estimate. Providers exposing a real tokenizer or a counting endpoint
     /// should override this; callers must never treat the result as a guarantee.
@@ -376,8 +380,7 @@ pub trait Model: Send + Sync + fmt::Debug {
             .map_or(0, crate::context::estimate_tokens);
 
         for message in &request.messages {
-            total =
-                total.saturating_add(u32::try_from(message.billable_len() / 4).unwrap_or(u32::MAX));
+            total = total.saturating_add(message.estimated_tokens());
         }
 
         // Tool schemas are sent on every request and are not free.
@@ -460,6 +463,53 @@ mod tests {
         assert!(
             msg.estimated_tokens() >= 40_000,
             "and the token estimate must reflect it"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_does_not_undercount_cjk() {
+        // The assembler budgets with `estimate_tokens` and the loop re-checks with this
+        // method. If they disagree, the re-check either rejects requests that fit or
+        // admits requests that overflow -- and on Korean the byte-based version was wrong
+        // by 2-4x in the dangerous direction.
+        #[derive(Debug)]
+        struct Bare(ModelId);
+
+        #[async_trait]
+        impl Model for Bare {
+            fn id(&self) -> &ModelId {
+                &self.0
+            }
+            fn capabilities(&self) -> ModelCapabilities {
+                ModelCapabilities::default()
+            }
+            async fn stream(&self, _request: ModelRequest) -> crate::Result<ModelStream> {
+                unimplemented!("not exercised")
+            }
+        }
+
+        let korean = "로그인 API를 구현해줘. 테스트가 통과해야 한다.".repeat(20);
+        let request = ModelRequest {
+            model: ModelId::new("test/model").unwrap(),
+            system: None,
+            messages: vec![Message::user(&korean)],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::default(),
+            params: ModelParams::default(),
+        };
+
+        let counted = Bare(ModelId::new("test/model").unwrap())
+            .count_tokens(&request)
+            .await
+            .unwrap();
+        assert_eq!(
+            counted,
+            u64::from(crate::context::estimate_tokens(&korean)),
+            "the default count must agree with the estimate the assembler budgets against"
+        );
+        assert!(
+            counted > (korean.len() / 4) as u64,
+            "and it must exceed the naive bytes/4, which undercounts CJK"
         );
     }
 

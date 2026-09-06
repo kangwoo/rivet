@@ -1,0 +1,13 @@
+: Recorded from api.openai.com /v1/chat/completions, gpt-4o-mini, stream=true.
+: The plain case: role-only first chunk, text deltas, empty final delta with a
+: finish_reason, then the sentinel.
+data: {"id":"chatcmpl-A1","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-A1","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"This project "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-A1","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"is a Rust agent runtime."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-A1","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
