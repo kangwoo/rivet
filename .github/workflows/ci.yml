@@ -51,6 +51,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Not `rustsec/audit-check`: it installs cargo-audit without `--locked`, so cargo
+      # resolves cargo-audit's own dependencies to their newest versions and the build
+      # fails the moment one of them raises its MSRV past ours.
+      #
+      # Two overrides are needed on top of `--locked`. `rust-toolchain.toml` pins this
+      # repository to 1.90 and applies to any cargo run inside the checkout, including
+      # this one, so `RUSTUP_TOOLCHAIN` steps around it -- the tool is not our code and
+      # does not belong under our MSRV. And this workflow sets `RUSTFLAGS: -D warnings`
+      # globally, which would fail the build on a warning in somebody else's crate.
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+        env:
+          RUSTUP_TOOLCHAIN: stable
+          RUSTFLAGS: ""
+
+      - name: Audit
+        run: cargo audit
+        env:
+          RUSTUP_TOOLCHAIN: stable
+          RUSTFLAGS: ""
