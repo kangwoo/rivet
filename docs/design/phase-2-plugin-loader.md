@@ -547,10 +547,11 @@ not settle.
 
 ## 8. 구현이 설계에서 벗어난 곳
 
-설계 리뷰를 통과한 뒤 구현하면서 갈라진 지점 셋. 전부 build 리뷰에서 검토·수용됐다.
-나머지 §3 항목은 쓰인 대로 만들어졌다.
+설계 리뷰를 통과한 뒤 구현하면서 갈라진 지점 셋, 그리고 PR 리뷰 2라운드에서 되돌아와
+고친 둘. 나머지 §3 항목은 쓰인 대로 만들어졌다.
 
-Three, all small. Everything else in §3 was built as written.
+Three from the build, plus two the second PR review sent back. Everything else in §3 was
+built as written.
 
 ---
 
@@ -607,12 +608,65 @@ negative assertion in `doctor_prints_what_each_plugin_actually_registered` (e2e)
 
 ---
 
+### 4. The guard closes: registration is legal only inside `load`
+
+**Design** — §4.3 and §5 give the guard two jobs, refusing undeclared slots and recording
+what was registered, and describe the failure path as `unregister_all(instance_id)` plus a
+token cancel. It never asks how long the handle stays live.
+
+**Built (review-2)** — it stays live forever, because that is what `PluginContext` is:
+`Clone`, with an `Arc` registry. Review-2 reproduced both consequences. A plugin whose
+`load` spawns a task and then returns `Err` gets that task's registration *after* the
+rollback, owned by an instance id no `unload` will ever name and invisible to
+`record.registered` — so `rivet doctor`, `rivet plugin list` and `claim_matches_reality`
+are all blind to it and nothing in the process can remove it. And a plugin that registers
+from `unload` — which runs *after* `unregister_all` — holds its own name against its next
+load, defeating DoD 5 while the record reads `UNLOADED` with an empty registration list.
+
+`GuardedRegistry` now has a registration window that the loader closes after `load`
+returns (both paths) and again before `Plugin::unload` runs. A `register_*` after that
+fails with an error naming the plugin, and logs at `warn` — the caller is a task the loader
+cannot see and is free to drop the `Err`.
+
+The window is an `RwLock<bool>` rather than the `AtomicBool` the review suggested: every
+`register_*` holds the read side across its whole check-delegate-record sequence, so `seal`
+waits out the registrations already in flight. With a flag, one that had passed the check
+could still land after the loader read `observed()` — a capability accepted by the registry
+and missing from `record.registered`, which is the same bug in a smaller window.
+
+§5 row 10 says a panic inside a task the plugin spawned is not caught. That is still true,
+and is now the *only* thing such a task can do that outlives the phase's guarantees.
+
+Covered by `a_registration_from_a_task_outliving_a_failed_load_is_refused` and
+`a_plugin_that_registers_from_unload_does_not_break_its_own_reload`; both fail without the
+seal.
+
+---
+
+### 5. `load_selected` promotes only its own batch
+
+**Design** — §4.3: "`load_selected()` commits the batch: every LOADED record becomes
+ACTIVE."
+
+**Built (review-2)** — taken literally, and *every* `LOADED` record means every record in
+the loader, not every record in the batch. A first batch that left a plugin at `LOADED`
+(because a sibling failed, so the host is about to tear it down) has that plugin silently
+promoted to `ACTIVE` by any later batch that succeeds. Both of the meanings §4.3 gives the
+two states are then false for it. The promotion is now filtered by `report.loaded`.
+
+`catalog::load` calls `load_selected` exactly once, so no in-tree caller reaches this; it
+is a public API and hot reload is the Phase 2 feature that would. Covered by
+`a_second_batch_does_not_promote_the_records_of_the_first`.
+
+---
+
 ### Not deviations, but decisions the design left open
 
 - **`load_selected` promotes `LOADED → ACTIVE` only when `report.failed` is empty.** This
   is the `design.md:341` vs `:347` contradiction review-1 named; the second reading is the
   one that makes both sentences true, and it is what makes a record left at `LOADED`
-  meaningful ("the host is about to tear this down"). Tested by
+  meaningful ("the host is about to tear this down"). §8-5 narrows *which* records that
+  promotes. Tested by
   `a_batch_becomes_active_only_when_every_plugin_loaded` and
   `a_batch_with_nothing_failing_commits_to_active`.
 

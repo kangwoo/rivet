@@ -697,9 +697,24 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    가리키게 됐다. **Phase 4의 sandbox가 이걸 물려받기 전에 의도적으로 다시 열어야 한다** —
    provider 호출을 막는 프로파일이 필요하면 별도 permission이 필요하고 그건 `rivet-core`
    변경이다. 근거: [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) §7-1.
-10. **`Permission::EventsSubscribe`를 주는 프로파일이 없다** — Phase 2에서 아무도 요청하지
-   않아 그대로 뒀지만, **Phase 3의 `telemetry.log` plugin이 첫날 빈 권한으로 막힌다.**
-   Phase 3 착수 시점에 어느 프로파일이 이걸 주는지 정해야 한다. 근거: 같은 문서 §7-3.
+10. **어느 프로파일도 주지 않는 permission이 넷이다** — `ProcessSpawn` · `SecretsRead` ·
+   `EventsSubscribe` · `JobManage`. `Profile::permissions()`가 주는 것은
+   `fs_read(workspace)` · `session_read` · `session_write` · `events_publish` ·
+   `network_http`, 그리고 쓰기 프로파일의 `fs_write(workspace)`뿐이다. Phase 2 전에는
+   교집합이 아무 데도 쓰이지 않아 무해했지만, 이제는 이 넷 중 하나를 선언한 매니페스트가
+   **모든 프로파일에서** 빈 권한이 된다.
+   - `EventsSubscribe` — **Phase 3의 `telemetry.log` plugin이 첫날 막힌다.**
+   - `ProcessSpawn` — `security.md` §8 표는 `developer`·`ci`에 `process ✓`를 약속하지만
+     주는 쪽이 없다. `plugin.md` §4.2가 "권한이 없으면 크게 실패한다"의 예로 `tool-shell`을
+     들었었는데, 그렇게 쓰면 그 plugin은 `developer`에서도 로드되지 않는다.
+   - `SecretsRead` — 파서가 비어 있지 않은 키 목록을 요구해 완성된 기능처럼 읽힌다.
+     저장·주입 경로는 §11-6대로 Phase 4 미설계다.
+   - `JobManage` — Phase 5까지 요청자가 없다.
+
+   어느 프로파일이 무엇을 주는지는 정리가 아니라 보안 결정이므로 요청자가 생기는 Phase
+   착수 시점(구독은 3, 시크릿·프로세스는 4)에 명시적으로 연다. 그때까지 문서 세 곳
+   (`security.md` §8 각주, `plugin.md` §4.2, 여기)이 같은 사실을 말한다. 근거: 같은 문서
+   §7-3, PR #1 리뷰 2라운드 finding 2.
 11. **`Interceptor`에 대응하는 `CapabilityKind`가 없다** — manifest guard가
    `register_interceptor`를 선언된 슬롯에 매핑할 수 없어 잠정적으로 `capabilities = ["policy"]`를
    요구한다. 변형을 추가하는 것은 닫힌 어휘를 넓히는 `rivet-core` 변경이라 Phase 2 범위 밖으로
@@ -708,6 +723,14 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    확인하려고 `[plugins."rivet.model-openai"]`를 직접 들여다본다. host가 특정 plugin의 설정
    키를 아는 것으로, Phase 2가 없앤 바로 그 종류의 결합이다. 더 나은 에러를 만들어 내므로
    남겨 뒀지만 부채다. 근거: 같은 문서 §7-7.
+13. **`fs_read`의 scope는 아무것도 좁히지 않는다** — `tool-filesystem`은 `fs_write`만
+   grant로 게이트하고 `read_file`·`list_dir`·`search`는 무조건 등록한다. 읽기를
+   워크스페이스에 가두는 것은 grant가 아니라 `Workspace::resolve`와 fsguard다. 그래서
+   `fs_read({ subtree = "docs" })`를 선언한 매니페스트도 워크스페이스 전체를 읽는
+   `read_file`을 받고 `rivet plugin show`는 그것을 `granted`로 출력한다. 즉 읽기 scope는
+   Phase 2에서 **선언**이며, 도구별 경로 범위를 실제로 강제하는 것은 Phase 4의 sandbox다.
+   파서가 탈출 서브트리를 지금 거부하는 것은 그 강제가 붙을 때 어휘가 이미 정확하도록
+   하기 위한 것이다. 근거: PR #1 리뷰 2라운드 question 1.
 
 ---
 
