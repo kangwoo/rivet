@@ -183,11 +183,24 @@ rivet plugin show rivet.tool-filesystem
 
 ### DoD
 
-- [ ] 부분 등록 후 실패한 plugin이 **아무것도** 남기지 않음 (테스트)
-- [ ] ABI 불일치 plugin이 등록 시도 전에 거부됨
-- [ ] `readonly` 프로파일이 쓰기 plugin의 쓰기 권한을 실제로 제거
-- [ ] 이름 충돌 시 양쪽 plugin 이름이 에러에 나옴
-- [ ] unload 후 같은 이름 재등록 성공 (hot reload 전제)
+각 항목 뒤는 그것을 증명하는 테스트 이름이다.
+
+- [x] 부분 등록 후 실패한 plugin이 **아무것도** 남기지 않음 (테스트)
+      — `a_plugin_that_fails_after_registering_leaves_nothing`,
+      `a_plugin_that_panics_after_registering_leaves_nothing`
+- [x] ABI 불일치 plugin이 등록 시도 전에 거부됨
+      — `an_incompatible_abi_is_rejected_before_load_is_called` (spy가 `load` 진입을
+      기록하고, 그 플래그가 false임을 확인한다)
+- [x] `readonly` 프로파일이 쓰기 plugin의 쓰기 권한을 실제로 제거
+      — `a_readonly_profile_strips_write_permission` (로더),
+      `a_grant_without_write_does_not_offer_a_write_tool` (plugin),
+      `a_readonly_profile_leaves_write_file_unregistered` (e2e)
+- [x] 이름 충돌 시 양쪽 plugin 이름이 에러에 나옴 — `a_name_collision_names_both_plugins`
+- [x] unload 후 같은 이름 재등록 성공 (hot reload 전제)
+      — `a_plugin_reloads_under_the_same_name`
+
+미검증으로 남긴 것: `Plugin::load`/`unload`가 **매달리는** 경우에 타임아웃이 없다.
+in-process plugin 셋은 모두 신뢰 대상이라 위험이 낮지만, 강제되는 것은 없다.
 
 ---
 
@@ -339,8 +352,10 @@ rivet "explain this repo"                  # 왕복 대화
 rivet resume <session>                     # replay 재개
 
 # Phase 2
-rivet plugin list                          # 등록 목록
-rivet plugin show rivet.tool-git           # 권한 교집합 표시
+rivet plugin list                          # 이 빌드의 plugin 목록 + 어느 것이 켜져 있는지
+                                           # (구성만 본다. 등록 목록은 `rivet doctor`)
+rivet plugin show rivet.tool-filesystem    # 권한 교집합 표시
+rivet plugin new acme.tool-lint            # 새 plugin crate 스캐폴딩
 
 # Phase 4
 rivet --profile readonly "delete all logs" # 거부되어야 함
@@ -359,7 +374,7 @@ rivet job list
 |---|---|---|
 | 0 Repository | ✅ 완료 | 135 passed · clippy 0 · 리뷰 2회전 반영 완료 |
 | 1 Minimal Agent | ✅ 완료 | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 전부 충족 (1번은 실제 provider 수동 검증) · build 리뷰 지적 11건 반영 |
-| 2 Plugin | ⬜ | 롤백 무결성 |
+| 2 Plugin | ✅ 완료 | 448 passed (+63) · clippy 0 · `cargo doc` 0 · DoD 5개 전부 충족 · 롤백 무결성(`Err`·패닉 양쪽) 테스트로 확인 |
 | 3 Event | ⬜ | TUI가 런타임 타입 미참조 |
 | 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |
 | 5 Job Runtime | ⬜ | Demo 무개입 완주 |

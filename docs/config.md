@@ -109,24 +109,34 @@ root = "..."   # 예제 파일에는 없다
 enabled = ["rivet.model-openai", "rivet.tool-filesystem"]
 ```
 
-Phase 1이 **실제로 등록할 수 있는** id는 셋뿐이다.
-
-| id | 내용 |
-|---|---|
-| `rivet.model-openai` | OpenAI 호환 provider |
-| `rivet.tool-filesystem` | `read_file` `write_file` `list_dir` `search` |
-| `rivet.context-builtin` | 시스템 프롬프트 + 워크스페이스 provider — **끌 수 없다.** 적어도 되고 적어도 아무 일 안 한다 |
-
-예제 파일이 켜 두는 나머지 넷(`rivet.tool-shell`, `rivet.tool-git`,
-`rivet.policy-default`, `rivet.sandbox-local`)은 **경고하고 건너뛴다.**
+Phase 2부터 **중간 범주는 없다.** 여기 적은 id는 로드되거나, 오타여서 시작할 때
+실패하거나 둘 중 하나다. "경고하고 건너뛴다"는 더 이상 없다.
 
 ```
-· `rivet.tool-shell` is enabled but ships in a later phase; skipping
+rivet: [Runtime/InvalidArgument] `[plugins].enabled` names `rivet.tool-shel`, which this
+build does not provide. Available: rivet.model-openai, rivet.tool-filesystem,
+rivet.context-builtin.
 ```
 
-예제를 복사한 설정이 첫 설정일 가능성이 가장 높아서, 실패시키지 않고 넘어간다.
-**두 목록 어디에도 없는 id는 오타이고 시작할 때 실패한다.** Phase 2의 로더가 들어오면 이
-중간 범주는 사라지고, 모든 id는 로드되거나 오타이거나 둘 중 하나가 된다.
+**목록은 문서가 아니라 빌드가 정한다.** in-process plugin은 링크되므로 로드 가능한
+집합이 컴파일 시점에 고정된다. 지금 이 빌드가 무엇을 가지고 있는지는 물어보면 된다.
+
+```bash
+rivet plugin list                        # 이 빌드의 모든 plugin (API 키 필요 없음)
+rivet plugin show rivet.tool-filesystem  # 매니페스트 + 프로파일 교집합 결과
+```
+
+`rivet.context-builtin`(시스템 프롬프트 + 워크스페이스 provider)은 **끌 수 없다.**
+루프가 요청을 조립할 수 없기 때문이다. 적어도 되고, 안 적어도 항상 등록된다.
+
+`rivet.tool-shell`·`rivet.tool-git`·`rivet.policy-default`·`rivet.sandbox-local`은
+Phase 4에서 온다. 그때까지 여기 적으면 오타와 똑같이 실패한다 — 아무것도 등록하지 않는
+plugin을 끼워 넣는 것은 `rivet plugin list`에 거짓말을 하는 일이기 때문이다.
+
+**`enabled`를 아예 쓰지 않거나 빈 목록으로 두면 "이 빌드가 가진 plugin 전부"다.**
+`rivet.toml` 없이 `rivet "이 저장소 설명해줘"`가 도는 이유가 이것이다. 목록에 같은 id를
+두 번 적으면 한 번만 로드된다. 순서는 계약이 아니다 — 이름 충돌은 레지스트리가 거부하고
+interceptor는 priority로 정렬된다.
 
 ### `[plugins."<plugin id>"]` — plugin별 설정
 
@@ -177,6 +187,24 @@ api_key_env = "OLLAMA_API_KEY"
 `[agent] model`과 `[plugins."rivet.model-openai"]`는 **같이 바꿔야 한다.** 하나만 바꾸면
 엉뚱한 엔드포인트에 엉뚱한 모델명을 보낸다.
 
+#### `agent` 키는 예약되어 있다
+
+호스트는 **모든** plugin의 테이블에 `agent` 객체를 하나 끼워 넣는다.
+
+```json
+{ "agent": { "model": "deepseek/deepseek-chat", "instructions": "…" } }
+```
+
+`rivet.model-openai`가 `agent.model`을, `rivet.context-builtin`이 `agent.instructions`를
+여기서 읽는다. 덕분에 호스트가 plugin id별 배선을 들고 있지 않아도 되고, 같은 모양이
+Phase 6의 프로세스 경계도 그대로 건너간다. 설정 파일이 `[plugins."<id>"]` 안에
+`agent`를 직접 쓰면 **시작할 때 실패한다** — 조용히 덮어쓰지 않는다.
+
+> 남은 빚 하나: `api_key_env`는 세션이 생기기 *전에* 자격증명을 확인하려고 호스트가
+> `[plugins."rivet.model-openai"]`를 직접 들여다본다. Phase 2 이후 CLI에 남은 유일한
+> 하드코딩된 plugin id다. 더 나은 에러를 주기 때문에 남겨 뒀고, plugin 자신도 load에서
+> 같은 검사를 한다.
+
 ### `[policy]` — 프로파일
 
 ```toml
@@ -191,13 +219,23 @@ profile = "developer"   # developer | readonly | reviewer | ci | production
 도구는 호출될 수 없다.** `readonly`는 모델이 `write_file`을 애초에 받지 못한다는 뜻이지,
 정책이 막아준다는 뜻은 아직 아니다.
 
-| 프로파일 | 쓰기 도구 | 도구 범위 | 무인 |
-|---|---|---|---|
-| `developer` | ○ | 전부 | |
-| `ci` | ○ | 전부 | ○ |
-| `readonly` | ✗ | 전부(쓰기 제외) | |
-| `production` | ✗ | 전부(쓰기 제외) | |
-| `reviewer` | ✗ | `read_file` `list_dir` `search` 만 | |
+| 프로파일 | 쓰기 도구 | 도구 범위 | provider 네트워크 | 무인 |
+|---|---|---|---|---|
+| `developer` | ○ | 전부 | ○ | |
+| `ci` | ○ | 전부 | ○ | ○ |
+| `readonly` | ✗ | 전부(쓰기 제외) | ○ | |
+| `production` | ✗ | 전부(쓰기 제외) | ○ | |
+| `reviewer` | ✗ | `read_file` `list_dir` `search` 만 | ○ | |
+
+Phase 2부터 프로파일의 권한 집합은 각 plugin의 매니페스트와 **실제로 교집합된다.**
+`readonly`에서 `rivet.tool-filesystem`의 `fs_write`가 사라지고, 그래서 `write_file`이
+애초에 등록되지 않는다. `rivet plugin show rivet.tool-filesystem --profile readonly`가
+그 결과를 그대로 보여준다.
+
+**네트워크는 모든 프로파일이 준다.** 권한 어휘에 `NetworkHttp`가 하나뿐이고 모델
+plugin과 도구 plugin이 그것을 공유하므로, `readonly`에서 빼면 provider 호출까지 막혀
+어떤 프로파일로도 에이전트를 돌릴 수 없게 된다. 도구 egress를 따로 막는 것은 Phase 4
+샌드박스의 일이고, 지금은 아무것도 강제하지 않는다. `docs/security.md` §8 참고.
 
 `ci`만 무인으로 친다. `production`을 무인으로 두면, Phase 4에서 승인이 붙는 순간 모든
 승인 대상을 **묻지 않고 자동 거부**하게 된다 — 보안 문서의 프로파일 표는 `production`을

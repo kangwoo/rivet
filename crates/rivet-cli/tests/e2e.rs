@@ -163,6 +163,84 @@ async fn a_readonly_profile_does_not_offer_the_write_tool() {
 }
 
 #[tokio::test]
+async fn doctor_prints_what_each_plugin_actually_registered() {
+    // The registrations come from the loader's guard, not from what a plugin claims, so
+    // this is also the check that the guard is in the path at all.
+    let provider = Provider::start(vec![]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    let (code, stdout, stderr) = workspace.run(&["doctor"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    assert!(
+        stdout.contains("ACTIVE"),
+        "a committed batch is ACTIVE: {stdout}"
+    );
+    assert!(stdout.contains("rivet.context-builtin"), "{stdout}");
+    assert!(stdout.contains("+ context:system"), "{stdout}");
+    assert!(stdout.contains("+ model:loopback/test-model"), "{stdout}");
+    assert!(stdout.contains("+ tool:write_file"), "{stdout}");
+    assert!(
+        !stdout.contains("reported"),
+        "no plugin should be overstating what it registered: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn a_readonly_profile_leaves_write_file_unregistered() {
+    // DoD 3 end to end: the profile meets `fs_write` away, the plugin sees the narrowed
+    // grant and never registers the tool, so `doctor` cannot print it.
+    let provider = Provider::start(vec![]).await;
+    let workspace = Workspace::new(&provider.base_url);
+
+    let (code, stdout, stderr) = workspace.run(&["--profile", "developer", "doctor"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("+ tool:write_file"), "{stdout}");
+
+    let (code, stdout, stderr) = workspace.run(&["--profile", "readonly", "doctor"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("+ tool:read_file"), "{stdout}");
+    assert!(
+        !stdout.contains("tool:write_file"),
+        "the plugin must not have registered it at all: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn with_no_config_file_every_plugin_the_build_provides_is_loaded() {
+    // An absent `[plugins].enabled` means "everything this build provides". Every other
+    // end-to-end test writes an explicit list, so nothing else here would notice if the
+    // loader silently resolved the default to nothing -- and the symptom would be
+    // `rivet "explain this repo"` quietly running with no model and no tools.
+    let dir = tempfile::tempdir().unwrap();
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_rivet"))
+        .arg("doctor")
+        .current_dir(dir.path())
+        // The default `api_key_env`, since there is no file to point somewhere else.
+        .env("OPENAI_API_KEY", "not-a-real-key")
+        .env("RUST_LOG", "warn")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("spawn rivet");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for registration in [
+        "+ model:deepseek/deepseek-chat",
+        "+ tool:read_file",
+        "+ tool:write_file",
+        "+ context:system",
+        "+ context:workspace",
+    ] {
+        assert!(
+            stdout.contains(registration),
+            "{registration} missing: {stdout}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn session_list_and_show_read_the_durable_log() {
     let provider = Provider::start(vec![sse_text("hello there")]).await;
     let workspace = Workspace::new(&provider.base_url);

@@ -6,10 +6,11 @@
 //! Phase 0 shipped the command surface; Phase 1 connects it to a runtime that exists. The
 //! surface itself is unchanged, because it was reviewed as the shape of the UX.
 
-mod bootstrap;
+mod catalog;
 mod config;
 mod doctor;
 mod exit;
+mod plugin_cmd;
 mod render;
 mod run;
 mod session_cmd;
@@ -238,22 +239,17 @@ async fn dispatch(cli: Cli) -> i32 {
             Ok(false) => exit::CONFIG,
             Err(error) => report(&error),
         },
-        (Some(Command::Plugin(PluginCommand::List)), _) => match bootstrap::load(&config).await {
-            Ok(loaded) => {
-                for entry in &loaded.registered {
-                    println!("{entry}");
-                }
-                for id in &loaded.deferred {
-                    println!("{id} (later phase)");
-                }
-                loaded.shutdown();
-                exit::OK
+        (Some(Command::Plugin(command)), _) => {
+            // None of these load a plugin, so none of them needs a credential.
+            let result = match command {
+                PluginCommand::List => plugin_cmd::list(&config),
+                PluginCommand::Show { id } => plugin_cmd::show(&config, &id),
+                PluginCommand::New { name } => plugin_cmd::new(&name),
+            };
+            match result {
+                Ok(()) => exit::OK,
+                Err(error) => report(&error),
             }
-            Err(error) => report(&error),
-        },
-        (Some(Command::Plugin(_)), _) => {
-            eprintln!("rivet: plugin scaffolding and inspection land in Phase 2");
-            exit::CONFIG
         }
         (Some(Command::Job(_)), _) => {
             eprintln!("rivet: the job runtime lands in Phase 5");

@@ -1,0 +1,23 @@
+[package]
+name = "rivet-context-builtin"
+description = "The system-prompt and workspace context providers, packaged as a plugin."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rivet-core.workspace = true
+# The providers themselves live in the runtime; this crate only registers them.
+rivet-runtime.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+
+[dev-dependencies]
+rivet-plugin.workspace = true
+
+[lints]
+workspace = true

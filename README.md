@@ -13,9 +13,10 @@ Plugin · Model · Tool · ContextProvider · Policy · Sandbox
 Session · Agent · Workflow · Job · Scheduler · Evaluator
 ```
 
-> 상태: Phase 1 완료 — **실제로 도는 에이전트**. 실제 provider와 왕복하고, 파일을 읽고
-> 쓰고, 세션을 append-only 로그에 fsync하며, Ctrl-C와 `kill -9` 뒤에도 재개된다.
-> 다음은 Phase 2(plugin 로더). 설계 문서는 [`docs/`](./docs)에 있다.
+> 상태: Phase 2 완료 — **기능이 crate 경계 밖에서 등록된다**. 각 plugin은
+> `rivet-plugin.toml`을 들고 오고, 로더가 그것을 파싱해 ABI를 검사하고
+> `manifest ∩ profile`을 계산한 뒤 등록시킨다. 실패한 plugin은 아무것도 남기지 않는다.
+> 다음은 Phase 3(이벤트·TUI). 설계 문서는 [`docs/`](./docs)에 있다.
 
 ---
 
@@ -46,20 +47,29 @@ rivet "list the files here and explain what this project does"
 rivet resume ses_...                              # 중단된 세션을 이어서
 rivet session list | rivet session show <id> --json
 rivet doctor                                      # 설정·deny list·자격증명·plugin 점검
+rivet plugin list                                 # 이 빌드가 가진 plugin (API 키 불필요)
+rivet plugin show rivet.tool-filesystem           # 매니페스트 + 프로파일 권한 교집합
+rivet plugin new acme.tool-lint                   # 새 plugin crate 스캐폴딩
 ```
 
-`rivet.example.toml`을 `rivet.toml`로 복사하면 그대로 동작한다. 아직 없는 plugin
-(`tool-shell` `tool-git` `policy-default` `sandbox-local`)은 경고 후 건너뛴다.
+`rivet.example.toml`을 `rivet.toml`로 복사하면 그대로 동작한다. `[plugins].enabled`를
+비워 두면 이 빌드가 가진 plugin 전부가 로드된다.
+
+**Phase 2부터 plugin id에 중간 범주는 없다.** 적은 id는 로드되거나 오타여서 시작할 때
+실패하거나 둘 중 하나다. `tool-shell` `tool-git` `policy-default` `sandbox-local`은
+Phase 4에서 오며, 그때까지 `enabled`에 적으면 실패한다 — 아무것도 등록하지 않는 plugin을
+목록에 끼워 넣는 것은 `rivet plugin list`에 거짓말을 하는 일이기 때문이다.
 
 두 가지는 이름과 달리 오해하기 쉬우므로 분명히 해 둔다.
 
 - **`--jsonl`은 관찰용이다.** 이벤트 버스는 설계상 lossy이므로(느린 구독자는 이벤트를
   잃고, 그 사실은 `SubscriberLagged`로 보고된다) 이 스트림으로 세션을 재구성할 수 없다.
   세션 재구성은 durable 로그를 읽는 `rivet session show --json`이다.
-- **Phase 1의 `--profile`은 policy가 아니다.** 프로파일은 에이전트에게 어떤 도구를
-  **제공할지**를 좁힌다(파이프라인 2단계). `--profile readonly`는 `write_file`을 아예
-  등록하지 않으므로 모델이 부를 수 없지만, 이것은 정책 강제가 아니다. 진짜 policy chain과
-  승인은 Phase 4다.
+- **`--profile`은 아직 policy가 아니다.** 프로파일은 에이전트에게 어떤 도구를
+  **제공할지**를 좁힌다(파이프라인 2단계). Phase 2부터 그 좁히기는 진짜 권한 교집합으로
+  일어난다 — `readonly`는 `rivet.tool-filesystem`의 매니페스트에서 `fs_write`를 없애고,
+  plugin은 `write_file`을 아예 등록하지 않는다. 그래도 이것은 정책 강제가 아니다. 진짜
+  policy chain과 승인은 Phase 4다.
 
 ---
 
@@ -75,9 +85,10 @@ crates/
   rivet-tui        TUI (이벤트 스트림 소비자)
   rivet-cli        `rivet` 바이너리
 
-plugins/
+plugins/                            각 crate가 rivet-plugin.toml을 함께 들고 있다
   model-openai     OpenAI 호환 (OpenAI · DeepSeek · Ollama · vLLM · OpenRouter)
   tool-filesystem  read · write · list · search
+  context-builtin  시스템 프롬프트 · 워크스페이스 스케치 (끌 수 없다)
   tool-shell       샌드박스 경유 셸
   tool-git         status · diff · log · commit
   policy-default   워크스페이스 봉쇄 · 파괴적 명령 게이트

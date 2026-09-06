@@ -3,11 +3,13 @@
 //! The point is to answer questions an operator otherwise has to guess at. Which
 //! `rivet.toml` won? Which directory is the workspace, and therefore what is fenced in?
 //! Do the deny globs match the files the operator thinks they match? Is the API key
-//! variable set? Which plugins are real and which are placeholders?
+//! variable set? Which plugins loaded, and what did each one actually register?
 
 use std::path::Path;
 
-use crate::bootstrap;
+use rivet_plugin::loader::state_label;
+
+use crate::catalog;
 use crate::config::Config;
 
 /// Print the resolved configuration and check what can be checked offline.
@@ -89,21 +91,66 @@ pub async fn run(config: &Config) -> rivet_core::Result<bool> {
     }
 
     println!("\nplugins");
-    let loaded = bootstrap::load(config).await?;
-    for entry in &loaded.registered {
-        println!("  + {entry}");
-    }
-    for id in &loaded.deferred {
-        println!("  · {id} (ships in a later phase; skipped)");
-    }
-    loaded.shutdown();
+    let host = catalog::load(config).await?;
+    healthy &= report_plugins(config, &host);
+    host.shutdown();
 
     println!("\ntools offered to the model");
     let scope = config.profile.tool_scope();
-    for name in loaded.registry.tool_names().await {
+    for name in host.registry.tool_names().await {
         let in_scope = scope.as_ref().is_none_or(|s| s.contains(&name));
         println!("  {} {name}", if in_scope { "+" } else { "-" });
     }
 
     Ok(healthy)
+}
+
+/// One block per plugin: what it is, and what it actually put in the registry.
+///
+/// Returns whether everything looked right, which is not the same as "it loaded": a
+/// plugin whose `PluginHandle` overstates what it registered loaded fine and is still
+/// something an operator needs to know about.
+fn report_plugins(config: &Config, host: &catalog::Host) -> bool {
+    let mut healthy = true;
+    for record in host.loader.records() {
+        println!(
+            "  {:<10} {:<24} {:<8} {}",
+            state_label(record.state),
+            record.id.as_str(),
+            record.manifest.version,
+            record.origin
+        );
+        for entry in &record.registered {
+            println!("    + {entry}");
+        }
+        // What a plugin registered is observed through the loader's guard; its
+        // `PluginHandle` is only a claim. A divergence is worth surfacing -- it is
+        // exactly the kind of thing the guard exists to catch.
+        if !record.claim_matches_reality() {
+            println!(
+                "    ! this plugin reported {:?} but registered {:?}",
+                record.claimed, record.registered
+            );
+            healthy = false;
+        }
+        if let Some(error) = &record.error {
+            println!("    ! {error}");
+        }
+    }
+
+    // A `[plugins."<id>"]` table for something nothing loaded is not fatal -- people
+    // comment ids out and keep the table -- but it is silently doing nothing.
+    let loaded: Vec<&str> = host
+        .loader
+        .records()
+        .iter()
+        .filter(|record| record.instance_id.is_some())
+        .map(|record| record.id.as_str())
+        .collect();
+    for id in config.plugin_settings.keys() {
+        if !loaded.contains(&id.as_str()) {
+            println!("  \u{b7} `[plugins.\"{id}\"]` is configured but `{id}` is not loaded");
+        }
+    }
+    healthy
 }

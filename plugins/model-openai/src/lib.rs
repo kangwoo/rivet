@@ -41,9 +41,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use rivet_core::capability::{CapabilityKind, Permission};
+use rivet_core::capability::Permission;
 use rivet_core::error::{Capability, Error};
-use rivet_core::id::PluginId;
 use rivet_core::model::{
     Model, ModelCapabilities, ModelId, ModelRequest, ModelStream, StopReason, StreamEvent,
 };
@@ -55,6 +54,9 @@ pub use ids::{SequentialIds, ToolCallIdFactory, Uuidv7Ids};
 
 /// The plugin id this crate registers under.
 pub const PLUGIN_ID: &str = "rivet.model-openai";
+
+/// This crate's `rivet-plugin.toml`, for a host catalog to hand to the loader.
+pub const MANIFEST_TOML: &str = include_str!("../rivet-plugin.toml");
 
 /// Set to a directory to dump every raw SSE body for later use as a test fixture.
 pub const RECORD_FIXTURES_ENV: &str = "RIVET_RECORD_FIXTURES";
@@ -313,41 +315,44 @@ impl Recorder {
 }
 
 /// Registers one [`OpenAiModel`] built from the `[plugins."rivet.model-openai"]` table.
+///
+/// The model id arrives in `ctx.config` under the host-injected `agent` key rather than
+/// through a constructor argument. That is the Phase 6 shape applied early: a plugin on
+/// the other side of a process boundary receives bytes, not a [`ModelId`].
 #[derive(Debug)]
 pub struct OpenAiPlugin {
-    model: ModelId,
+    manifest: PluginManifest,
 }
 
 impl OpenAiPlugin {
     #[must_use]
-    pub fn new(model: ModelId) -> Self {
-        Self { model }
-    }
-
-    /// The manifest, also used by `rivet plugin show`.
-    ///
-    /// # Panics
-    /// Never: [`PLUGIN_ID`] is a valid plugin id and there is a test that says so.
-    #[must_use]
-    pub fn manifest_for(model: &ModelId) -> PluginManifest {
-        let _ = model;
-        PluginManifest::new(
-            PluginId::new(PLUGIN_ID).expect("PLUGIN_ID is a valid plugin id"),
-            "OpenAI-compatible models",
-            env!("CARGO_PKG_VERSION"),
-        )
-        .with_capabilities([CapabilityKind::Model])
-        .with_permissions([Permission::NetworkHttp(None)])
+    pub fn new(manifest: PluginManifest) -> Self {
+        Self { manifest }
     }
 }
 
 #[async_trait]
 impl Plugin for OpenAiPlugin {
     fn manifest(&self) -> PluginManifest {
-        Self::manifest_for(&self.model)
+        self.manifest.clone()
     }
 
     async fn load(&self, ctx: PluginContext) -> rivet_core::Result<PluginHandle> {
+        // A model with no egress cannot answer, so this fails loudly rather than
+        // degrading. `tool-filesystem` takes the other idiom -- both are in
+        // `docs/plugin.md` §4.2, and which one applies is the plugin's decision.
+        if !ctx
+            .permissions
+            .granted()
+            .iter()
+            .any(|p| matches!(p, Permission::NetworkHttp(_)))
+        {
+            return Err(Error::plugin(format!(
+                "`{PLUGIN_ID}` needs `network_http`, and the active profile grants none; \
+                 a model plugin with no egress cannot serve a request"
+            )));
+        }
+
         let config: OpenAiConfig = if ctx.config.is_null() {
             OpenAiConfig::default()
         } else {
@@ -355,6 +360,16 @@ impl Plugin for OpenAiPlugin {
                 Error::plugin(format!("`[plugins.\"{PLUGIN_ID}\"]` is not valid")).with_cause(e)
             })?
         };
+
+        let model_id = ctx.config["agent"]["model"]
+            .as_str()
+            .ok_or_else(|| {
+                Error::plugin(format!(
+                    "`{PLUGIN_ID}` was loaded without `agent.model` in its config; \
+                     the host injects that key for every plugin"
+                ))
+            })
+            .and_then(ModelId::new)?;
 
         // Fail here, not at the first request: a missing key is a setup mistake and the
         // operator should learn about it before a session exists.
@@ -370,7 +385,7 @@ impl Plugin for OpenAiPlugin {
             )
         })?;
 
-        let model = OpenAiModel::new(self.model.clone(), config, api_key)?;
+        let model = OpenAiModel::new(model_id, config, api_key)?;
         let name = model.id().to_string();
         ctx.registry.register_model(Arc::new(model)).await?;
         Ok(PluginHandle::new([format!("model:{name}")]))
@@ -395,15 +410,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_plugin_id_is_valid() {
-        assert!(PluginId::new(PLUGIN_ID).is_ok());
+    fn the_manifest_matches_the_crate() {
+        let manifest = rivet_plugin::parse(MANIFEST_TOML).expect("the shipped manifest parses");
+        assert_eq!(manifest.id.as_str(), PLUGIN_ID);
+        assert_eq!(manifest.version, env!("CARGO_PKG_VERSION"));
+        assert!(manifest.is_compatible_with(rivet_core::ABI_VERSION));
     }
 
     #[test]
-    fn the_manifest_only_asks_for_network_access() {
-        let manifest = OpenAiPlugin::manifest_for(&ModelId::new("openai/gpt-4o").unwrap());
-        assert_eq!(manifest.capabilities, [CapabilityKind::Model]);
+    fn the_manifest_declares_a_model_and_asks_only_for_network_access() {
+        let manifest = rivet_plugin::parse(MANIFEST_TOML).unwrap();
+        assert_eq!(
+            manifest.capabilities,
+            [rivet_core::capability::CapabilityKind::Model]
+        );
         assert_eq!(manifest.permissions, [Permission::NetworkHttp(None)]);
-        assert!(manifest.is_compatible_with(rivet_core::ABI_VERSION));
     }
 }
