@@ -67,7 +67,7 @@ pub struct FileConfig {
     pub sandbox: toml::Table,
     /// Parsed and carried, unused until Phase 5.
     #[serde(default)]
-    pub task: toml::Table,
+    pub job: toml::Table,
     /// Named agents. Parsed so a config that declares a reviewer still loads, but Phase 1
     /// has no surface for selecting one, so nothing here takes effect — including the
     /// `context_providers` names, which do not all exist yet.
@@ -274,7 +274,7 @@ impl Profile {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Inert {
     pub sandbox: bool,
-    pub task: bool,
+    pub job: bool,
     pub named_agents: Vec<String>,
 }
 
@@ -357,7 +357,7 @@ impl Config {
         let sessions_dir = workspace.root().join(SESSIONS_DIR);
         let inert = Inert {
             sandbox: !file.sandbox.is_empty(),
-            task: !file.task.is_empty(),
+            job: !file.job.is_empty(),
             // `[agents.*]` is parsed so a config declaring a reviewer still loads, but
             // Phase 1 has no way to select one -- and its `context_providers` names do not
             // all exist yet, so acting on it would fail at startup.

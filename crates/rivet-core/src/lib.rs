@@ -4,7 +4,7 @@
 //!
 //! Everything in this crate is one of:
 //!
-//! - a domain type (`Task`, `SessionEvent`, `ToolSpec`, ...)
+//! - a domain type (`Job`, `SessionEvent`, `ToolSpec`, ...)
 //! - a capability trait (`Model`, `Tool`, `Policy`, `Sandbox`, ...)
 //! - an event definition
 //! - an error type
@@ -28,6 +28,7 @@ pub mod context;
 pub mod error;
 pub mod event;
 pub mod id;
+pub mod job;
 pub mod memory;
 pub mod model;
 pub mod plugin;
@@ -35,7 +36,6 @@ pub mod policy;
 pub mod retry;
 pub mod sandbox;
 pub mod session;
-pub mod task;
 pub mod time;
 pub mod tool;
 pub mod workspace;
@@ -56,7 +56,7 @@ pub mod prelude {
     pub use crate::context::{ContextItem, ContextProvider, ContextRequest, ContextSlot};
     pub use crate::error::{Error, Result};
     pub use crate::event::{Event, EventBus, EventEnvelope};
-    pub use crate::id::{AgentId, PluginId, RunId, SessionId, TaskId, ToolCallId};
+    pub use crate::id::{AgentId, JobId, PluginId, RunId, SessionId, ToolCallId};
     pub use crate::model::{Model, ModelId, ModelRequest, ModelStream, StreamEvent};
     pub use crate::plugin::{Plugin, PluginContext, PluginHandle, PluginManifest};
     pub use crate::policy::{Policy, PolicyDecision, PolicyRequest, RestrictiveDecision};

@@ -101,8 +101,8 @@ pub enum Permission {
     EventsPublish,
     /// Read named secrets, by key.
     SecretsRead(Vec<String>),
-    /// Read and write the task graph.
-    TaskManage,
+    /// Read and write the job graph.
+    JobManage,
 }
 
 /// Where filesystem access is allowed.

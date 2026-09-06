@@ -1,6 +1,6 @@
 [package]
-name = "rivet-task"
-description = "Task runtime: graph execution, state machine driver, review gate."
+name = "rivet-job"
+description = "Job runtime: graph execution, state machine driver, review gate."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

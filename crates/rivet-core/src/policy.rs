@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::capability::PermissionSet;
-use crate::id::{AgentId, ApprovalId, RunId, SessionId, TaskId};
+use crate::id::{AgentId, ApprovalId, JobId, RunId, SessionId};
 use crate::tool::{ToolAnnotations, ToolCall};
 use crate::workspace::Workspace;
 
@@ -29,13 +29,13 @@ pub enum PolicyAction {
         plugin_id: String,
         requested: PermissionSet,
     },
-    /// Start an agent run for a task.
+    /// Start an agent run for a job.
     StartRun {
-        task_id: Option<TaskId>,
+        job_id: Option<JobId>,
         model: String,
     },
-    /// Move a task to a terminal state without human sign-off.
-    AutoApproveTask { task_id: TaskId },
+    /// Move a job to a terminal state without human sign-off.
+    AutoApproveJob { job_id: JobId },
 }
 
 /// Everything a policy may consider.

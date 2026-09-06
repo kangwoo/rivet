@@ -4,7 +4,7 @@ members = [
     "crates/rivet-core",
     "crates/rivet-runtime",
     "crates/rivet-session",
-    "crates/rivet-task",
+    "crates/rivet-job",
     "crates/rivet-plugin",
     "crates/rivet-tui",
     "crates/rivet-cli",
@@ -30,7 +30,7 @@ authors = ["Rivet contributors"]
 rivet-core = { path = "crates/rivet-core", version = "0.1.0" }
 rivet-runtime = { path = "crates/rivet-runtime", version = "0.1.0" }
 rivet-session = { path = "crates/rivet-session", version = "0.1.0" }
-rivet-task = { path = "crates/rivet-task", version = "0.1.0" }
+rivet-job = { path = "crates/rivet-job", version = "0.1.0" }
 rivet-plugin = { path = "crates/rivet-plugin", version = "0.1.0" }
 rivet-tui = { path = "crates/rivet-tui", version = "0.1.0" }
 

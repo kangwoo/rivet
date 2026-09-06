@@ -10,7 +10,7 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::id::{AgentId, RunId, SessionId, TaskId, ToolCallId};
+use crate::id::{AgentId, JobId, RunId, SessionId, ToolCallId};
 use crate::model::{Message, ModelId, StopReason, Usage};
 use crate::time::Timestamp;
 use crate::tool::{ToolCall, ToolResult};
@@ -39,7 +39,7 @@ pub enum SessionEvent {
         run_id: RunId,
         agent_id: AgentId,
         model: ModelId,
-        task_id: Option<TaskId>,
+        job_id: Option<JobId>,
     },
     #[serde(rename = "user.message")]
     UserMessage { message: Message },

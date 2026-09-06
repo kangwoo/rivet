@@ -15,11 +15,11 @@ use crate::capability::{CapabilityKind, CapabilityVersion, Permission, Permissio
 use crate::context::ContextProvider;
 use crate::event::{EventBus, EventSubscriber};
 use crate::id::{PluginId, PluginInstanceId};
+use crate::job::{Scheduler, Workflow};
 use crate::memory::Memory;
 use crate::model::Model;
 use crate::policy::{Policy, PolicyRequest, RestrictiveDecision};
 use crate::sandbox::Sandbox;
-use crate::task::{Scheduler, Workflow};
 use crate::tool::Tool;
 
 /// Declarative metadata, mirroring `rivet-plugin.toml`.
@@ -112,7 +112,7 @@ pub trait PluginRegistry: Send + Sync + fmt::Debug {
 
 /// What a plugin gets at load time.
 ///
-/// Note the absence of a runtime handle, a session store, and a task graph. A plugin that
+/// Note the absence of a runtime handle, a session store, and a job graph. A plugin that
 /// needs to observe the run subscribes to events; a plugin that needs to *change* the run
 /// registers an [`Interceptor`] or a [`Policy`]. There is no third way in.
 #[derive(Clone)]
@@ -171,7 +171,7 @@ pub trait Plugin: Send + Sync + fmt::Debug {
     ///
     /// Must be idempotent-safe on failure: if `load` returns `Err` after partial
     /// registration, the loader rolls back everything this instance registered. Do not
-    /// leave background tasks running on the error path.
+    /// leave background jobs running on the error path.
     async fn load(&self, ctx: PluginContext) -> crate::Result<PluginHandle>;
 
     /// Release resources. The loader has already unregistered this plugin's capabilities

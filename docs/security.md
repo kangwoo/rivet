@@ -217,7 +217,7 @@ ExecSpec { env: BTreeMap::new(), .. }   // 상속하지 않는다
 ### 취소
 
 ```text
-Task cancel → Agent cancel → Tool cancel → 프로세스 트리 종료
+Job cancel → Agent cancel → Tool cancel → 프로세스 트리 종료
 ```
 
 취소 토큰의 방향은 **한 방향으로 고정**되어 있다. `SandboxHandle::exec(spec, cancel)`의
@@ -300,7 +300,7 @@ pub enum Permission {
     NetworkHttp(Option<Vec<String>>),
     SessionRead, SessionWrite,
     EventsSubscribe, EventsPublish,
-    SecretsRead(Vec<String>), TaskManage,
+    SecretsRead(Vec<String>), JobManage,
 }
 ```
 

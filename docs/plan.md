@@ -12,11 +12,11 @@
 
 ```text
 Agent Loop → Session Event → Tool 계약 → Model 계약 → Event Bus
-  → Plugin Registry → Policy → Sandbox → Task Runtime → TUI → External Plugin
+  → Plugin Registry → Policy → Sandbox → Job Runtime → TUI → External Plugin
 ```
 
 특히 **`Agent Loop + Session + Event`를 먼저 안정화해야** 나머지를 안전하게 확장할 수
-있다. 이 셋이 흔들리는 상태에서 Task Runtime을 얹으면 두 배로 고쳐야 한다.
+있다. 이 셋이 흔들리는 상태에서 Job Runtime을 얹으면 두 배로 고쳐야 한다.
 
 각 Phase는 **검증 가능한 완료 조건(DoD)** 을 가진다. "대충 됨"으로 다음 Phase에 넘어가지
 않는다.
@@ -51,7 +51,7 @@ cargo test --workspace         # 135 tests, 0 failed
 - Session event(durable) ≠ Bus event(lossy)
 - Context는 예산 인식, 항목 단위 폐기
 - 등록은 소유권 추적, 이름 충돌 거부
-- Task 종료 상태는 흡수, `RUNNING → COMPLETED` 직행 금지
+- Job 종료 상태는 흡수, `RUNNING → COMPLETED` 직행 금지
 - `Interceptor`는 허용을 넓힐 수 없고, 결과는 fold에 합류한다
 - 승인은 durable session event다
 - `ToolContext`는 직렬화 가능한 data와 live host로 분리한다
@@ -70,7 +70,7 @@ cargo test --workspace         # 135 tests, 0 failed
 | High | deny list가 glob·중첩·대소문자 모두 미처리 (`**/*.pem`이 아무것도 안 막음) | `GlobSet` + 대소문자 무시 + 문서 목록 회귀 테스트 |
 | High | `intersect`가 정확 일치 → 좁게 선언한 plugin이 권한 0개 | `Permission::meet` 부분순서 |
 | High | `ToolContext`가 `Arc<dyn ...>`를 들어 Phase 6 이전 불가 | `ToolContextData` + `ToolHost` 분리 |
-| High | `Task.state`가 pub → 한 줄로 리뷰 게이트 무력화 | private + `TaskGraph::apply()` |
+| High | `Job.state`가 pub → 한 줄로 리뷰 게이트 무력화 | private + `JobGraph::apply()` |
 | High | `is_settled()`가 `WAITING`을 종료로 간주 | `WAITING`을 live로 계산 |
 | High | 등록만 되고 조회 불가한 슬롯, 언로드 후에도 살아있는 구독자 태스크 | 접근자 추가 + 소유자별 `JoinHandle` abort |
 | High | `append`의 내구성 계약 부재, `Option<u64>` 탈출구 | fsync 계약 명시 + `Expect` enum |
@@ -88,9 +88,9 @@ cargo test --workspace         # 135 tests, 0 failed
 | Critical | `Modify`가 severity에 섞여 있어 ①좁힌 rewrite가 승인 요구에 삼켜지고 ②무제약 `Allow`가 다른 정책의 sandbox 요구를 지움 | `PolicyDecision`을 `outcome` / `rewrite` / `constraints` 세 필드로 분리, constraints는 축별 최소값으로 merge |
 | Critical | `FsScope::Subtree("../../../etc")`가 `Workspace` 프로파일과 meet하여 워크스페이스 밖 권한이 됨 | `is_contained()` 검증 + `FsScope::subtree()` 생성자 |
 | High | glob 전환이 디렉터리 봉쇄를 회귀시킴 — `.ssh`는 막고 `.ssh/id_rsa`는 통과 | `expand()`가 `p/**`와 `**/p/**`도 생성 |
-| High | 재시도 예산 강제가 `READY` 교착 생성 — 소진된 Task가 어디로도 못 감 | `(Ready, Failed)` 전이 추가 |
+| High | 재시도 예산 강제가 `READY` 교착 생성 — 소진된 Job이 어디로도 못 감 | `(Ready, Failed)` 전이 추가 |
 | High | `remembered_approvals`가 `ToolCallId` 키라 영원히 매칭 안 됨 | `scope_key` 도입, `is_pre_approved()` |
-| High | `derive(Deserialize)`가 Task 불변식 우회 — JSON으로 `COMPLETED`·순환 주입 가능 | `TaskGraph::from_tasks()` 경유 커스텀 `Deserialize` |
+| High | `derive(Deserialize)`가 Job 불변식 우회 — JSON으로 `COMPLETED`·순환 주입 가능 | `JobGraph::from_jobs()` 경유 커스텀 `Deserialize` |
 | High | Checkpoint가 `pending_tool_calls`를 안 비워 선행 호출 없는 tool result 생성 | Checkpoint에서 clear |
 | High | dedupe가 우선순위 무시 — 같은 key의 `Optional`이 `Required` 시스템 프롬프트를 축출 | 우선순위 높은 쪽을 남김 |
 | Medium | `count_tokens`가 여전히 `billable_len()/4` (바이트 기반) | `Message::estimated_tokens()` 문자 기반 |
@@ -205,7 +205,7 @@ rivet plugin show rivet.tool-filesystem
 | 3.2 | `EventSubscriber` 등록 + 토픽 필터 | `rivet-runtime` |
 | 3.3 | `telemetry.log` plugin (구조화 로그) | `plugins/` |
 | 3.4 | JSONL 이벤트 스트림 (`--jsonl`) | `rivet-cli` |
-| 3.5 | 기본 TUI (Task 패널 · Agent 패널 · 상태바) | `rivet-tui` |
+| 3.5 | 기본 TUI (Job 패널 · Agent 패널 · 상태바) | `rivet-tui` |
 
 ### DoD
 
@@ -260,35 +260,35 @@ unsafe tool → policy → approval | deny → sandbox → execution
 
 ---
 
-## Phase 5 — Task Runtime
+## Phase 5 — Job Runtime
 
 **목표**: 첫 번째 Demo가 동작한다.
 
 ```text
 "로그인 API를 구현해줘"
-  → Task 생성 → 저장소 조사 → 구현 → 테스트 → 실패 → 수정
+  → Job 생성 → 저장소 조사 → 구현 → 테스트 → 실패 → 수정
   → 테스트 → 리뷰 → 승인 → 완료
 ```
 
 | # | 작업 | crate |
 |---|---|---|
-| 5.1 | Task 저장 + 상태 전이 적용기 | `rivet-task` |
-| 5.2 | Local scheduler (claim / release) | `rivet-task` |
+| 5.1 | Job 저장 + 상태 전이 적용기 | `rivet-job` |
+| 5.2 | Local scheduler (claim / release) | `rivet-job` |
 | 5.3 | `Sequential` `Parallel` `ReviewGate` workflow | `plugins/workflow-default` |
-| 5.4 | Reviewer agent (다른 모델·다른 도구 집합) | `rivet-task` |
-| 5.5 | Task ↔ Run ↔ Session 연결 | `rivet-task` |
-| 5.6 | TUI Task 패널 (진행 체크리스트) | `rivet-tui` |
-| 5.7 | `rivet task list/show/cancel/review` | `rivet-cli` |
+| 5.4 | Reviewer agent (다른 모델·다른 도구 집합) | `rivet-job` |
+| 5.5 | Job ↔ Run ↔ Session 연결 | `rivet-job` |
+| 5.6 | TUI Job 패널 (진행 체크리스트) | `rivet-tui` |
+| 5.7 | `rivet job list/show/cancel/review` | `rivet-cli` |
 | 5.8 | 워크스페이스 동시성 결정 (열린 질문 §11-5) | — |
-| 5.9 | 리뷰 verdict를 durable하게 기록 | `rivet-task` |
+| 5.9 | 리뷰 verdict를 durable하게 기록 | `rivet-job` |
 
 ### DoD
 
 - [ ] Demo 시나리오가 사람 개입 없이 끝까지 진행
 - [ ] 리뷰 반려 → `READY` → 재시도 경로 동작
 - [ ] `max_attempts` 소진 시 `FAILED`
-- [ ] 실패한 의존성을 가진 Task가 `blocked()`로 보고됨
-- [ ] Run이 죽어도 Task 상태가 살아남고 재개 가능
+- [ ] 실패한 의존성을 가진 Job이 `blocked()`로 보고됨
+- [ ] Run이 죽어도 Job 상태가 살아남고 재개 가능
 
 ---
 
@@ -308,7 +308,7 @@ unsafe tool → policy → approval | deny → sandbox → execution
 
 ## Phase 7 — Distributed (탐색)
 
-Task queue · worker · remote agent · remote sandbox · persistent scheduler.
+Job queue · worker · remote agent · remote sandbox · persistent scheduler.
 Phase 5의 `Scheduler` 계약이 이미 `claim`/`release`를 갖고 있으므로 계약 변경 없이
 분산 구현을 끼울 수 있어야 한다. 그렇지 않다면 Phase 5의 계약이 틀린 것이다.
 
@@ -318,13 +318,13 @@ Phase 5의 `Scheduler` 계약이 이미 `claim`/`release`를 갖고 있으므로
 
 | MVP에 포함 | MVP 이후 |
 |---|---|
-| Workspace · Agent Loop · Session · Event Bus | Task Graph · Review Agent · Scheduler |
+| Workspace · Agent Loop · Session · Event Bus | Job Graph · Review Agent · Scheduler |
 | Model 계약 + OpenAI 호환 어댑터 | Memory · Evaluation |
 | Tool 계약 + filesystem · shell · git | Process Plugin · WASM Plugin |
 | Plugin Registry · Policy · Local Sandbox | Distributed Runtime |
 | CLI · 기본 TUI | Telemetry (otel · prometheus) |
 
-**Task Runtime은 Rivet의 핵심 차별화 요소**이므로 MVP+ 단계에서 곧바로 추가한다.
+**Job Runtime은 Rivet의 핵심 차별화 요소**이므로 MVP+ 단계에서 곧바로 추가한다.
 Phase 5를 뒤로 미루면 Rivet은 "또 하나의 코딩 에이전트"가 된다.
 
 ---
@@ -351,8 +351,8 @@ rivet --profile readonly "delete all logs" # 거부되어야 함
 rivet --headless "rm -rf /"                # 매달리지 않고 거부
 
 # Phase 5
-rivet run --task "implement login API"     # Demo
-rivet task list
+rivet run --job "implement login API"     # Demo
+rivet job list
 ```
 
 ---
@@ -366,6 +366,6 @@ rivet task list
 | 2 Plugin | ⬜ | 롤백 무결성 |
 | 3 Event | ⬜ | TUI가 런타임 타입 미참조 |
 | 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |
-| 5 Task Runtime | ⬜ | Demo 무개입 완주 |
+| 5 Job Runtime | ⬜ | Demo 무개입 완주 |
 | 6 External Plugin | ⬜ | 동일 소스 양쪽 동작 |
 | 7 Distributed | ⬜ | 계약 변경 없이 분산 구현 |

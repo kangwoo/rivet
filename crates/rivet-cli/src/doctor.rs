@@ -63,13 +63,13 @@ pub async fn run(config: &Config) -> rivet_core::Result<bool> {
         }
     }
 
-    if config.inert.sandbox || config.inert.task || !config.inert.named_agents.is_empty() {
+    if config.inert.sandbox || config.inert.job || !config.inert.named_agents.is_empty() {
         println!("\nconfigured but not yet in force");
         if config.inert.sandbox {
             println!("  [sandbox]   read, but no confinement is applied until Phase 4");
         }
-        if config.inert.task {
-            println!("  [task]      read, but the task runtime lands in Phase 5");
+        if config.inert.job {
+            println!("  [job]      read, but the job runtime lands in Phase 5");
         }
         if !config.inert.named_agents.is_empty() {
             println!(

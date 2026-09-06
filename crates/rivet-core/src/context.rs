@@ -11,7 +11,7 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::id::{AgentId, RunId, SessionId, TaskId};
+use crate::id::{AgentId, JobId, RunId, SessionId};
 use crate::model::Message;
 use crate::workspace::Workspace;
 
@@ -23,8 +23,8 @@ pub enum ContextSlot {
     SystemPrompt,
     /// Repository shape, language, build commands.
     Environment,
-    /// The active task and its acceptance criteria.
-    Task,
+    /// The active job and its acceptance criteria.
+    Job,
     /// Recalled memory.
     Memory,
     /// Skills or playbooks selected for this run.
@@ -94,7 +94,7 @@ pub struct ContextRequest {
     pub session_id: SessionId,
     pub agent_id: AgentId,
     pub run_id: RunId,
-    pub task_id: Option<TaskId>,
+    pub job_id: Option<JobId>,
     pub workspace: Workspace,
     /// Turn number within the run. Providers use this to skip expensive work after the
     /// first turn (a repo tree rarely changes between turns).
@@ -304,14 +304,14 @@ mod tests {
         let items = vec![
             item(ContextSlot::SystemPrompt, "sys", 100, Priority::Required),
             item(ContextSlot::Memory, "mem", 100, Priority::Optional),
-            item(ContextSlot::Task, "task", 100, Priority::Important),
+            item(ContextSlot::Job, "job", 100, Priority::Important),
         ];
         let (kept, dropped) = fit_to_budget(items, 250).unwrap();
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].key, "mem");
         assert_eq!(
             kept.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(),
-            ["sys", "task"]
+            ["sys", "job"]
         );
     }
 
@@ -320,14 +320,14 @@ mod tests {
         let items = vec![
             item(ContextSlot::RuntimeState, "state", 10, Priority::Normal),
             item(ContextSlot::SystemPrompt, "sys", 10, Priority::Required),
-            item(ContextSlot::Task, "task", 10, Priority::Normal),
+            item(ContextSlot::Job, "job", 10, Priority::Normal),
         ];
         let (kept, _) = fit_to_budget(items, 100).unwrap();
         assert_eq!(
             kept.iter().map(|i| i.slot).collect::<Vec<_>>(),
             [
                 ContextSlot::SystemPrompt,
-                ContextSlot::Task,
+                ContextSlot::Job,
                 ContextSlot::RuntimeState
             ]
         );
@@ -351,7 +351,7 @@ mod tests {
         // Optional one. That is exactly backwards.
         let items = vec![
             item(ContextSlot::SystemPrompt, "sys", 100, Priority::Required),
-            item(ContextSlot::Task, "task", 400, Priority::Important),
+            item(ContextSlot::Job, "job", 400, Priority::Important),
             item(ContextSlot::Memory, "mem", 40, Priority::Optional),
         ];
         let (kept, dropped) = fit_to_budget(items, 200).unwrap();
@@ -360,7 +360,7 @@ mod tests {
             ["sys"]
         );
         let dropped_keys: Vec<_> = dropped.iter().map(|d| d.key.as_str()).collect();
-        assert!(dropped_keys.contains(&"task"));
+        assert!(dropped_keys.contains(&"job"));
         assert!(
             dropped_keys.contains(&"mem"),
             "nothing of lower priority may be admitted once something was dropped"

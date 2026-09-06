@@ -30,7 +30,7 @@ replay가 델타에서 메시지를 다시 유도할 필요가 없어야 결정�
 
 ```text
 session.created         workspace_root, parent(fork point)
-run.started             run_id, agent_id, model, task_id?
+run.started             run_id, agent_id, model, job_id?
 user.message            message
 model.requested         run_id, model, request_digest   ← 요청 *전에* 기록
 assistant.message       run_id, message, stop_reason, usage
@@ -146,11 +146,11 @@ tool.execute.progress          call_id, message           ← 저장 안 됨
 tool.execute.completed         call_id, is_error, duration_ms
 tool.blocked                   call_id, reason
 
-task.created                   task_id, goal
-task.state.changed             task_id, from, to, reason
-task.run.attached              task_id, run_id, attempt
-task.review.requested          task_id, reviewer
-task.review.completed          task_id, verdict
+job.created                   job_id, goal
+job.state.changed             job_id, from, to, reason
+job.run.attached              job_id, run_id, attempt
+job.review.requested          job_id, reviewer
+job.review.completed          job_id, verdict
 
 plugin.discovered              plugin_id
 plugin.loaded                  plugin_id, capabilities
@@ -166,9 +166,9 @@ runtime.subscriber.lagged      subscriber, dropped
 
 ```rust
 fn topics(&self) -> Vec<String> {
-    vec!["tool.".into(), "task.state".into()]
+    vec!["tool.".into(), "job.state".into()]
 }
-// "tool.execute.started" ✓   "task.state.changed" ✓   "agent.run.started" ✗
+// "tool.execute.started" ✓   "job.state.changed" ✓   "agent.run.started" ✗
 ```
 
 빈 목록은 "전부 구독"이다.
@@ -267,7 +267,7 @@ while let Ok(envelope) = rx.recv().await {
     match &envelope.payload {
         Event::Agent(AgentEvent::TextDelta { text }) => ui.append(text),
         Event::Tool(ToolEvent::Started { name, .. })  => ui.spinner(name),
-        Event::Task(TaskEvent::StateChanged { .. })   => ui.refresh_checklist(),
+        Event::Job(JobEvent::StateChanged { .. })   => ui.refresh_checklist(),
         _ => {}
     }
 }

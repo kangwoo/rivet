@@ -184,7 +184,7 @@ impl AgentLoop {
                 run_id: cfg.run_id,
                 agent_id: cfg.agent.id,
                 model: cfg.agent.model.clone(),
-                task_id: None,
+                job_id: None,
             })
             .await?;
         if let Some(message) = input {
@@ -241,7 +241,7 @@ impl AgentLoop {
             run_id: cfg.run_id,
             session_id: cfg.session_id,
             agent_id: cfg.agent.id,
-            task_id: None,
+            job_id: None,
             stop,
             turns: tally.turns,
             usage: tally.usage,
@@ -353,7 +353,7 @@ impl AgentLoop {
             session_id: cfg.session_id,
             agent_id: cfg.agent.id,
             run_id: cfg.run_id,
-            task_id: None,
+            job_id: None,
             workspace: cfg.workspace.clone(),
             turn: turn.saturating_sub(1),
             budget_tokens: limits.max_context_tokens,

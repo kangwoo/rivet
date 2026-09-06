@@ -14,10 +14,10 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::id::{AgentId, EventId, PluginId, RunId, SessionId, TaskId, ToolCallId};
+use crate::id::{AgentId, EventId, JobId, PluginId, RunId, SessionId, ToolCallId};
+use crate::job::JobState;
 use crate::model::{ModelId, StopReason, Usage};
 use crate::policy::PolicyDecision;
-use crate::task::TaskState;
 use crate::time::Timestamp;
 
 /// An event plus its delivery metadata.
@@ -63,7 +63,7 @@ impl EventEnvelope {
 pub enum Event {
     Agent(AgentEvent),
     Tool(ToolEvent),
-    Task(TaskEvent),
+    Job(JobEvent),
     Plugin(PluginEvent),
     Runtime(RuntimeEvent),
 }
@@ -74,7 +74,7 @@ impl Event {
         match self {
             Self::Agent(e) => e.topic(),
             Self::Tool(e) => e.topic(),
-            Self::Task(e) => e.topic(),
+            Self::Job(e) => e.topic(),
             Self::Plugin(e) => e.topic(),
             Self::Runtime(e) => e.topic(),
         }
@@ -197,41 +197,41 @@ impl ToolEvent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TaskEvent {
+pub enum JobEvent {
     Created {
-        task_id: TaskId,
+        job_id: JobId,
         goal: String,
     },
     StateChanged {
-        task_id: TaskId,
-        from: TaskState,
-        to: TaskState,
+        job_id: JobId,
+        from: JobState,
+        to: JobState,
         reason: String,
     },
     RunAttached {
-        task_id: TaskId,
+        job_id: JobId,
         run_id: RunId,
         attempt: u32,
     },
     ReviewRequested {
-        task_id: TaskId,
+        job_id: JobId,
         reviewer: AgentId,
     },
     ReviewCompleted {
-        task_id: TaskId,
-        verdict: crate::task::ReviewVerdict,
+        job_id: JobId,
+        verdict: crate::job::ReviewVerdict,
     },
 }
 
-impl TaskEvent {
+impl JobEvent {
     #[must_use]
     pub fn topic(&self) -> &'static str {
         match self {
-            Self::Created { .. } => "task.created",
-            Self::StateChanged { .. } => "task.state.changed",
-            Self::RunAttached { .. } => "task.run.attached",
-            Self::ReviewRequested { .. } => "task.review.requested",
-            Self::ReviewCompleted { .. } => "task.review.completed",
+            Self::Created { .. } => "job.created",
+            Self::StateChanged { .. } => "job.state.changed",
+            Self::RunAttached { .. } => "job.run.attached",
+            Self::ReviewRequested { .. } => "job.review.requested",
+            Self::ReviewCompleted { .. } => "job.review.completed",
         }
     }
 }
@@ -347,9 +347,9 @@ mod tests {
 
     #[test]
     fn prefix_filters_match_by_segment_prefix() {
-        let filters = vec!["tool.".to_string(), "task.state".to_string()];
+        let filters = vec!["tool.".to_string(), "job.state".to_string()];
         assert!(topic_matches(&filters, "tool.execute.started"));
-        assert!(topic_matches(&filters, "task.state.changed"));
+        assert!(topic_matches(&filters, "job.state.changed"));
         assert!(!topic_matches(&filters, "agent.run.started"));
     }
 

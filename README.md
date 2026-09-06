@@ -10,7 +10,7 @@ contracts** that plugins extend.
 
 ```text
 Plugin · Model · Tool · ContextProvider · Policy · Sandbox
-Session · Agent · Workflow · Task · Scheduler · Evaluator
+Session · Agent · Workflow · Job · Scheduler · Evaluator
 ```
 
 > 상태: Phase 1 완료 — **실제로 도는 에이전트**. 모델과 왕복하고, 파일을 읽고 쓰고,
@@ -32,7 +32,7 @@ Rivet은 그 루프를 작게 유지하고, 나머지를 전부 교체 가능한
 | 도구 추가 | 루프 수정 | plugin 등록 |
 | 권한 규칙 | 각 도구가 자체 판단 | 독립 `Policy` capability |
 | 세션 | 로그 파일 | event-sourced, replay·fork 가능 |
-| 장기 작업 | 없음 | `Task` 그래프 + 리뷰 게이트 |
+| 장기 작업 | 없음 | `Job` 그래프 + 리뷰 게이트 |
 | UI | 루프에 결합 | 이벤트 스트림 소비자 |
 | 격리 | 있거나 없거나 | 보장을 스스로 신고하는 `Sandbox` |
 
@@ -70,7 +70,7 @@ crates/
   rivet-core       계약만. I/O 없음. 모든 plugin이 이것에 컴파일된다
   rivet-runtime    기본 실행 구현 (loop · dispatcher · bus · registry)
   rivet-session    append-only 이벤트 로그
-  rivet-task       Task 그래프 실행
+  rivet-job        Job 그래프 실행
   rivet-plugin     탐색 · 매니페스트 · lifecycle
   rivet-tui        TUI (이벤트 스트림 소비자)
   rivet-cli        `rivet` 바이너리
@@ -115,7 +115,7 @@ RIVET_LIVE=1 DEEPSEEK_API_KEY=... \
 | [plan.md](./docs/plan.md) | Phase별 작업 계획과 완료 조건 |
 | [plugin.md](./docs/plugin.md) | plugin 작성 가이드 |
 | [events.md](./docs/events.md) | Session event vs Bus event |
-| [task.md](./docs/task.md) | Task 상태 기계와 리뷰 게이트 |
+| [job.md](./docs/job.md) | Job 상태 기계와 리뷰 게이트 |
 | [security.md](./docs/security.md) | 위협 모델과 방어 계층 |
 
 ---
@@ -131,8 +131,8 @@ RIVET_LIVE=1 DEEPSEEK_API_KEY=... \
 합성 규칙을 Core에 박았고, `Interceptor`는 `Allow`를 **표현할 수 없는** 타입을 반환한다.
 등록 순서에 따라 달라지는 보안 결정은 보안 결정이 아니다.
 
-**3. Task는 Run보다 오래 산다.**
-Run이 죽어도, 리뷰에서 반려돼도, 모델을 바꿔도 Task는 이어진다. 그리고 `Task::state`는
+**3. Job은 Run보다 오래 산다.**
+Run이 죽어도, 리뷰에서 반려돼도, 모델을 바꿔도 Job은 이어진다. 그리고 `Job::state`는
 private이다 — 한 줄의 대입으로 무력화되는 게이트는 게이트가 아니다.
 
 **4. 크래시는 예외가 아니라 전제다.**

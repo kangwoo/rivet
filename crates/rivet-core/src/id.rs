@@ -85,12 +85,12 @@ define_id!(
     AgentId, "agt"
 );
 define_id!(
-    /// A single execution of an agent against a session. A task may have many runs.
+    /// A single execution of an agent against a session. A job may have many runs.
     RunId, "run"
 );
 define_id!(
-    /// A unit of durable intent in the task graph.
-    TaskId, "tsk"
+    /// A unit of durable intent in the job graph.
+    JobId, "job"
 );
 define_id!(
     /// A single tool invocation requested by the model.
@@ -188,8 +188,8 @@ mod tests {
 
     #[test]
     fn ids_are_time_ordered() {
-        let a = TaskId::new();
-        let b = TaskId::new();
+        let a = JobId::new();
+        let b = JobId::new();
         assert!(a < b, "uuidv7 ids must sort by creation time");
     }
 

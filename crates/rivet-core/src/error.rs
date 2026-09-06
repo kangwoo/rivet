@@ -79,7 +79,7 @@ pub enum Capability {
     Policy,
     Sandbox,
     Session,
-    Task,
+    Job,
     Plugin,
     Memory,
     Storage,

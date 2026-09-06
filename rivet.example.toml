@@ -54,7 +54,7 @@ provider = "local"       # local | docker | podman
 # Check `guarantees()` output: `local` isolates nothing and says so.
 # The runtime always calls teardown(); a sandbox is never released by Drop alone.
 
-[task]
+[job]
 workflow        = "review-gate"
 max_attempts    = 3
 max_concurrency = 1      # see architecture.md open question §11-5
@@ -64,10 +64,10 @@ max_concurrency = 1      # see architecture.md open question §11-5
 #
 # Phase 1 parses this section and reports it in `rivet doctor`, but has no command-line
 # surface for selecting a named agent, so nothing here takes effect yet. Note that
-# `context_providers` names a `task` and a `git` provider that do not exist until later
+# `context_providers` names a `job` and a `git` provider that do not exist until later
 # phases; Phase 1 registers `system` and `workspace`.
 [agents.reviewer]
 model             = "anthropic/claude-sonnet-5"
 tools             = ["read_file", "list_dir", "git_diff", "git_log"]
 profile           = "reviewer"
-context_providers = ["system", "task", "git"]
+context_providers = ["system", "job", "git"]

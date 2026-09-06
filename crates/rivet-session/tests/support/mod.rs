@@ -63,7 +63,7 @@ pub fn run_started(run_id: RunId) -> SessionEvent {
         run_id,
         agent_id: rivet_core::id::AgentId::new(),
         model: ModelId::new("openai/gpt-4o").unwrap(),
-        task_id: None,
+        job_id: None,
     }
 }
 

@@ -256,7 +256,7 @@ mod tests {
             session_id: SessionId::new(),
             agent_id: AgentId::new(),
             run_id: RunId::new(),
-            task_id: None,
+            job_id: None,
             workspace,
             turn,
             budget_tokens: 100_000,

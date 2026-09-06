@@ -21,8 +21,8 @@ Plugin이 하는 일은 하나다: **넘겨받은 registry에 capability를 등�
 | `Sandbox` | `Sandbox` | 실행 격리 |
 | `SessionStore` | `SessionStore` | 세션 영속화 |
 | `Memory` | `Memory` | 회상·기억 |
-| `Workflow` | `Workflow` | Task 그래프 실행 정책 |
-| `Scheduler` | `Scheduler` | READY task → Agent Run |
+| `Workflow` | `Workflow` | Job 그래프 실행 정책 |
+| `Scheduler` | `Scheduler` | READY job → Agent Run |
 | `Evaluator` | `Evaluator` | 완료된 Run 채점 |
 | `EventSubscriber` | `EventSubscriber` | 관찰 (차단 불가) |
 | `Command` | — | CLI 하위 명령 (Phase 3) |

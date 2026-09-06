@@ -5,7 +5,7 @@
 
 이 문서는 Rivet의 구조적 결정과 **그 결정을 내린 이유**를 기록한다.
 "무엇을 만드는가"는 [`plan.md`](./plan.md)에, 개별 계약의 세부는
-[`plugin.md`](./plugin.md) · [`events.md`](./events.md) · [`task.md`](./task.md) ·
+[`plugin.md`](./plugin.md) · [`events.md`](./events.md) · [`job.md`](./job.md) ·
 [`security.md`](./security.md)에 있다.
 
 ---
@@ -26,7 +26,7 @@ Rivet의 목표는 에이전트를 하나 더 만드는 것이 아니라, **에�
 (capability)의 계약을 안정화하고 그 계약을 Plugin으로 확장하는 런타임**을 만드는 것이다.
 
 계약이 안정되면 같은 런타임 위에서 Coding Agent, Review Agent, DevOps Agent,
-CI Agent, Task Orchestrator를 조합할 수 있다.
+CI Agent, Job Orchestrator를 조합할 수 있다.
 
 ---
 
@@ -39,10 +39,10 @@ CI Agent, Task Orchestrator를 조합할 수 있다.
 └───────────────────────────┬──────────────────────────────────┘
                             │
 ┌───────────────────────────▼──────────────────────────────────┐
-│  Task Runtime      Graph · State Machine · Review · Scheduler │
+│  Job Runtime       Graph · State Machine · Review · Scheduler │
 │                    "무엇을 목표로 하는가"                        │
 └───────────────────────────┬──────────────────────────────────┘
-                            │  Task → Agent Run (1:N)
+                            │  Job → Agent Run (1:N)
 ┌───────────────────────────▼──────────────────────────────────┐
 │  Agent Runtime     Agent Loop · Context Assembly · Session    │
 │                    "지금 무엇을 실행하는가"                      │
@@ -81,9 +81,9 @@ CI Agent, Task Orchestrator를 조합할 수 있다.
 | 종류 | 예 |
 |---|---|
 | Capability trait | `Model` `Tool` `Policy` `Sandbox` `ContextProvider` `Workflow` `Scheduler` `Memory` `Evaluator` |
-| Domain type | `Task` `SessionEvent` `ToolSpec` `PermissionSet` `Workspace` |
-| Event 정의 | `AgentEvent` `ToolEvent` `TaskEvent` `PluginEvent` `RuntimeEvent` |
-| Error / ID | `Error` `ErrorKind` `SessionId` `TaskId` `PluginId` |
+| Domain type | `Job` `SessionEvent` `ToolSpec` `PermissionSet` `Workspace` |
+| Event 정의 | `AgentEvent` `ToolEvent` `JobEvent` `PluginEvent` `RuntimeEvent` |
+| Error / ID | `Error` `ErrorKind` `SessionId` `JobId` `PluginId` |
 
 > **판별 기준**: `rivet-core`에 `reqwest`나 `tokio::process`를 추가하고 싶어졌다면,
 > 그 추상화는 잘못된 위치에 있다.
@@ -97,7 +97,7 @@ Context 조립 → Model 호출 → 응답 분기 → Tool 위임 → Session �
 ```
 
 Loop **안에** 넣지 않는 것: Git/Shell/Web 구현, 권한 판단, 저장소 구현, UI 로직,
-Task 스케줄링, Retry 분기.
+Job 스케줄링, Retry 분기.
 
 ### 3.3 확장은 Event와 Capability로만 한다
 
@@ -125,19 +125,19 @@ Model → Tool Call → Interceptor → Policy → Approval → Sandbox → Exec
 Tool은 자신의 권한 정책을 결정하지 않는다. `ShellTool`은 `rm -rf`가 위험한지 모르며,
 알 필요도 없다. 이것이 `readonly` 프로파일을 **실제로** 동작하게 만든다.
 
-### 3.5 Agent와 Task를 분리한다
+### 3.5 Agent와 Job을 분리한다
 
 - **Agent Run** = 지금 진행 중인 한 번의 실행 시도
-- **Task** = 목표와 상태를 소유하는 지속 단위
+- **Job** = 목표와 상태를 소유하는 지속 단위
 
 ```text
-Task ──┬── Agent Run #1 (구현)   → Session A
-       ├── Review Run  #1 (검토) → Session B
-       └── Agent Run #2 (수정)   → Session C
+Job ──┬── Agent Run #1 (구현)   → Session A
+      ├── Review Run  #1 (검토) → Session B
+      └── Agent Run #2 (수정)   → Session C
 ```
 
-Task가 Run보다 오래 산다. 그래서 Run이 죽어도, 리뷰에서 반려돼도, 모델을 바꿔도
-Task는 이어진다.
+Job이 Run보다 오래 산다. 그래서 Run이 죽어도, 리뷰에서 반려돼도, 모델을 바꿔도
+Job은 이어진다.
 
 ---
 
@@ -295,7 +295,7 @@ pub struct SandboxGuarantees {
 
 ```rust
 pub struct ContextItem {
-    slot: ContextSlot,      // SystemPrompt → Environment → Task → Memory
+    slot: ContextSlot,      // SystemPrompt → Environment → Job → Memory
                             // → Skills → RuntimeState → History
     priority: Priority,     // Optional < Normal < Important < Required
     key: String,            // 안정적 키: dedupe + prompt cache 적중
@@ -584,9 +584,9 @@ Cargo와 같이 모든 minor 변경을 breaking으로 취급한다.
 
 ---
 
-## 9. Task Runtime
+## 9. Job Runtime
 
-Rivet의 차별화 지점. 자세한 내용은 [`task.md`](./task.md).
+Rivet의 차별화 지점. 자세한 내용은 [`job.md`](./job.md).
 
 ```text
         PENDING ──► READY ──► RUNNING ──┬──► REVIEW ──┬──► COMPLETED
@@ -599,30 +599,30 @@ Rivet의 차별화 지점. 자세한 내용은 [`task.md`](./task.md).
 
 세 가지 결정:
 
-1. **종료 상태는 흡수 상태다.** `COMPLETED`에서 나가는 경로는 없다. 재개는 새 Task를
+1. **종료 상태는 흡수 상태다.** `COMPLETED`에서 나가는 경로는 없다. 재개는 새 Job을
    만든다는 뜻이고, 그래야 이력이 정직하다.
 2. **`RUNNING`에서 `COMPLETED`로 직행할 수 없다.** 반드시 `REVIEW`를 거친다. 게이트를
    건너뛸 수 있으면 게이트가 아니다. 리뷰가 필요 없는 워크플로는
-   `Task::complete_without_review()`를 쓰는데, 이것도 `REVIEW`를 **통과**한다 — 로그에
+   `Job::complete_without_review()`를 쓰는데, 이것도 `REVIEW`를 **통과**한다 — 로그에
    "열린 게이트"가 남지, "없는 게이트"가 남지 않는다.
 3. **실패한 의존성은 `blocked()`로 드러난다.** 실패한 leaf 하나 때문에 그래프 전체가
    영원히 "작업 중"으로 보이는 상황을 막는다.
 4. **`WAITING`은 종료가 아니다.** `is_settled()`는 `WAITING`을 살아있는 상태로 센다.
-   사람 승인을 기다리며 파킹한 Task를 "끝남"으로 보면, approval-gate 워크플로는 매번
+   사람 승인을 기다리며 파킹한 Job을 "끝남"으로 보면, approval-gate 워크플로는 매번
    사람이 답하기 전에 런타임이 종료된다.
 
 ### 상태 기계는 강제된다
 
-`Task::state`와 `depends_on`은 **private**이다. 공개 필드였다면
-`task.state = Completed` 한 줄로 리뷰 게이트가 무력화되고, `depends_on` 직접 수정으로
-순환 검사가 우회된다. 유일한 진입점은 `TaskGraph::apply()`와 `Task::transition_to()`이며
+`Job::state`와 `depends_on`은 **private**이다. 공개 필드였다면
+`job.state = Completed` 한 줄로 리뷰 게이트가 무력화되고, `depends_on` 직접 수정으로
+순환 검사가 우회된다. 유일한 진입점은 `JobGraph::apply()`와 `Job::transition_to()`이며
 둘 다 검증한다.
 
 재시도 예산도 전이에서 강제한다. `max_attempts` 소진 후 `RUNNING` 진입은 거부되므로,
 어떤 workflow plugin도 예산을 두 번 쓸 수 없다.
 
 `Workflow`는 그래프 모양에 대한 **순수 정책**이며 그래프를 변경하지 않는다. 상태 전이는
-Task Runtime이 적용한다. 버그 있는 workflow plugin은 진행을 멈출 수는 있어도 상태를
+Job Runtime이 적용한다. 버그 있는 workflow plugin은 진행을 멈출 수는 있어도 상태를
 오염시킬 수는 없다.
 
 ---
@@ -680,7 +680,7 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
 4. **대용량 payload** — 이미지·긴 tool 출력을 세션 로그에 인라인으로 넣으면 로그가
    비대해진다. content-addressed artifact store로 오프로딩하는 설계 필요. Phase 1에서
    `Truncation.artifact_ref` 자리만 잡아 두었다.
-5. **다중 Run 동시성** — 한 워크스페이스에서 두 Task가 동시에 실행되면 파일이 충돌한다.
+5. **다중 Run 동시성** — 한 워크스페이스에서 두 Job이 동시에 실행되면 파일이 충돌한다.
    git worktree 분리? 순차 강제? Phase 5 전 결정.
 6. **Secret 취급** — `Permission::SecretsRead(keys)`만 정의했고 저장·주입·마스킹 경로는
    미설계. Phase 4.
@@ -722,10 +722,10 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
 | 권한 | manifest ∩ profile | plugin이 자기 권한을 못 넓힘 |
 | Sandbox | 보장을 스스로 신고 | 운영자를 오해시키지 않음 |
 | `ExecSpec` env | 빈 상태에서 시작 | 시크릿 유출 기본 차단 |
-| Task 종료 상태 | 흡수 | 이력의 정직성 |
-| `Task.state` | private, 전이 함수만 | 공개 필드는 게이트를 장식으로 만듦 |
-| Task 역직렬화 | `from_tasks()` 검증 경유 | private 필드도 상태 파일로는 우회 가능 |
-| `READY → FAILED` | 허용 | 예산 소진 Task가 갈 곳이 있어야 함 |
+| Job 종료 상태 | 흡수 | 이력의 정직성 |
+| `Job.state` | private, 전이 함수만 | 공개 필드는 게이트를 장식으로 만듦 |
+| Job 역직렬화 | `from_jobs()` 검증 경유 | private 필드도 상태 파일로는 우회 가능 |
+| `READY → FAILED` | 허용 | 예산 소진 Job이 갈 곳이 있어야 함 |
 | `WAITING` | 진행 중으로 계산 | 승인 대기 중 런타임 종료 방지 |
 | Sandbox 해제 | `Drop` 아님, 런타임이 `teardown` 호출 | Rust `Drop`은 await 불가 |
 | deny list | glob + 대소문자 무시 + 서브트리 | 디렉터리만 막으면 그 안의 키가 열림 |

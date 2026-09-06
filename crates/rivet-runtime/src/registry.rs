@@ -17,6 +17,7 @@ use rivet_core::context::ContextProvider;
 use rivet_core::error::{Error, Result};
 use rivet_core::event::{EventBus, EventSubscriber};
 use rivet_core::id::{PluginId, PluginInstanceId};
+use rivet_core::job::{Scheduler, Workflow};
 use rivet_core::memory::Evaluator;
 use rivet_core::memory::Memory;
 use rivet_core::model::{Model, ModelId};
@@ -24,7 +25,6 @@ use rivet_core::plugin::{Interceptor, PluginRegistry};
 use rivet_core::policy::Policy;
 use rivet_core::sandbox::Sandbox;
 use rivet_core::session::SessionStore;
-use rivet_core::task::{Scheduler, Workflow};
 use rivet_core::tool::Tool;
 use tokio::sync::RwLock;
 
@@ -111,7 +111,7 @@ struct Tables {
     interceptors: Option<Table<dyn Interceptor>>,
     session_stores: Option<Table<dyn SessionStore>>,
     evaluators: Option<Table<dyn Evaluator>>,
-    /// Background tasks pumping events into subscribers, keyed by owner. Held here so
+    /// Background jobs pumping events into subscribers, keyed by owner. Held here so
     /// `unregister_all` can abort them: an unloaded plugin whose task keeps running would
     /// go on observing every event in the process.
     subscriber_tasks: Vec<(PluginInstanceId, JoinHandle<()>)>,

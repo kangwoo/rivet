@@ -60,21 +60,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run a prompt, optionally as a tracked task.
+    /// Run a prompt, optionally as a tracked job.
     Run {
         prompt: String,
-        /// Create a task and drive it through the configured workflow.
+        /// Create a job and drive it through the configured workflow.
         #[arg(long)]
-        task: bool,
+        job: bool,
     },
     /// Resume a previous session.
     Resume { session: String },
     /// Inspect sessions.
     #[command(subcommand)]
     Session(SessionCommand),
-    /// Inspect and drive tasks.
+    /// Inspect and drive jobs.
     #[command(subcommand)]
-    Task(TaskCommand),
+    Job(JobCommand),
     /// Inspect plugins.
     #[command(subcommand)]
     Plugin(PluginCommand),
@@ -99,7 +99,7 @@ enum SessionCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum TaskCommand {
+enum JobCommand {
     List,
     Show {
         id: String,
@@ -107,7 +107,7 @@ enum TaskCommand {
     Cancel {
         id: String,
     },
-    /// Record a review verdict on a task awaiting review.
+    /// Record a review verdict on a job awaiting review.
     Review {
         id: String,
         #[arg(value_enum)]
@@ -187,9 +187,9 @@ async fn dispatch(cli: Cli) -> i32 {
     };
 
     match (cli.command, cli.prompt) {
-        (Some(Command::Run { prompt, task }), _) => {
-            if task {
-                eprintln!("rivet: `--task` needs the task runtime, which lands in Phase 5");
+        (Some(Command::Run { prompt, job }), _) => {
+            if job {
+                eprintln!("rivet: `--job` needs the job runtime, which lands in Phase 5");
                 return exit::CONFIG;
             }
             finish(run::start(&config, &prompt, output).await)
@@ -238,8 +238,8 @@ async fn dispatch(cli: Cli) -> i32 {
             eprintln!("rivet: plugin scaffolding and inspection land in Phase 2");
             exit::CONFIG
         }
-        (Some(Command::Task(_)), _) => {
-            eprintln!("rivet: the task runtime lands in Phase 5");
+        (Some(Command::Job(_)), _) => {
+            eprintln!("rivet: the job runtime lands in Phase 5");
             exit::CONFIG
         }
         (None, None) => {
@@ -298,10 +298,10 @@ mod tests {
 
     #[test]
     fn subcommands_parse() {
-        let cli = Cli::parse_from(["rivet", "task", "review", "tsk_1", "approve"]);
+        let cli = Cli::parse_from(["rivet", "job", "review", "job_1", "approve"]);
         assert!(matches!(
             cli.command,
-            Some(Command::Task(TaskCommand::Review {
+            Some(Command::Job(JobCommand::Review {
                 verdict: Verdict::Approve,
                 ..
             }))

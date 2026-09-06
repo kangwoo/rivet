@@ -268,7 +268,7 @@ mod tests {
             session_id: SessionId::new(),
             agent_id: AgentId::new(),
             run_id: RunId::new(),
-            task_id: None,
+            job_id: None,
             workspace: Workspace::new(std::path::PathBuf::from("/repo")),
             turn: 0,
             budget_tokens: budget,

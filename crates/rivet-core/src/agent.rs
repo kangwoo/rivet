@@ -1,8 +1,8 @@
 //! The agent: a configured execution unit.
 //!
 //! An agent owns almost nothing. It is a *binding* of a model, a tool scope, a set of
-//! context providers, and limits. State lives in the session; intent lives in the task.
-//! Keeping the agent thin is what lets one task be carried by several runs, possibly on
+//! context providers, and limits. State lives in the session; intent lives in the job.
+//! Keeping the agent thin is what lets one job be carried by several runs, possibly on
 //! different models.
 
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,7 @@ pub struct RunSummary {
     pub run_id: crate::id::RunId,
     pub session_id: crate::id::SessionId,
     pub agent_id: AgentId,
-    pub task_id: Option<crate::id::TaskId>,
+    pub job_id: Option<crate::id::JobId>,
     pub stop: StopReason,
     pub turns: u32,
     pub usage: crate::model::Usage,
