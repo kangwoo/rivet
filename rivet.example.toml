@@ -1,0 +1,58 @@
+# Rivet configuration. Place at the workspace root as `rivet.toml`.
+
+[agent]
+model = "deepseek/deepseek-chat"
+
+# Hard stops. Each exists because its absence has burned someone.
+[agent.limits]
+max_turns                   = 50
+max_duration_ms             = 1_800_000    # 30 min
+max_total_tokens            = 2_000_000
+max_context_tokens          = 128_000
+max_consecutive_tool_errors = 5
+
+[workspace]
+# Inside the workspace but never readable or writable.
+#
+# Patterns are globs matched against the workspace-relative path, case-insensitively.
+# A bare name applies at any depth: `.env` also covers `sub/.env`.
+# A malformed pattern fails at startup rather than silently protecting nothing.
+#
+# `.git/config` is here because core.fsmonitor and core.pager are arbitrary
+# code execution paths: write access to git config is shell access.
+deny = [".env", ".git/config", ".ssh", "**/credentials.json", "**/*.pem"]
+
+[plugins]
+enabled = [
+    "rivet.model-openai",
+    "rivet.tool-filesystem",
+    "rivet.tool-shell",
+    "rivet.tool-git",
+    "rivet.policy-default",
+    "rivet.sandbox-local",
+]
+
+[plugins."rivet.model-openai"]
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"        # the key itself never goes in this file
+
+[policy]
+profile = "developer"    # developer | readonly | reviewer | ci | production
+
+[sandbox]
+provider = "local"       # local | docker | podman
+# Check `guarantees()` output: `local` isolates nothing and says so.
+# The runtime always calls teardown(); a sandbox is never released by Drop alone.
+
+[task]
+workflow        = "review-gate"
+max_attempts    = 3
+max_concurrency = 1      # see architecture.md open question §11-5
+
+# A reviewer is a normal agent with a different model and no write tools.
+# A reviewer that can edit the code is not a reviewer.
+[agents.reviewer]
+model             = "anthropic/claude-sonnet-5"
+tools             = ["read_file", "list_dir", "git_diff", "git_log"]
+profile           = "reviewer"
+context_providers = ["system", "task", "git"]

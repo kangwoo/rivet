@@ -1,0 +1,28 @@
+[package]
+name = "rivet-core"
+description = "Contracts for the Rivet agent runtime: traits, domain types, events, errors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures-core.workspace = true
+globset.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio = { workspace = true }
+serde_json.workspace = true
+
+[lints]
+workspace = true
