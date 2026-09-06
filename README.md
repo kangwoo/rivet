@@ -111,6 +111,7 @@ RIVET_LIVE=1 DEEPSEEK_API_KEY=... \
 
 | 문서 | 내용 |
 |---|---|
+| [config.md](./docs/config.md) | `rivet.toml` 설정 레퍼런스 |
 | [architecture.md](./docs/architecture.md) | 구조적 결정과 **그 이유** |
 | [plan.md](./docs/plan.md) | Phase별 작업 계획과 완료 조건 |
 | [plugin.md](./docs/plugin.md) | plugin 작성 가이드 |
