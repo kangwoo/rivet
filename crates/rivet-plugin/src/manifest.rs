@@ -11,7 +11,9 @@
 
 use std::fmt;
 
-use rivet_core::capability::{CapabilityKind, CapabilityVersion, FsScope, Permission};
+use rivet_core::capability::{
+    CapabilityKind, CapabilityVersion, FsScope, Permission, StringSet, TopicScope,
+};
 use rivet_core::error::Error;
 use rivet_core::id::PluginId;
 use rivet_core::plugin::PluginManifest;
@@ -113,16 +115,20 @@ fn permission_from_raw(
         // An absent scope is the widest grant, so it cannot be spelled as an empty list.
         "network_http" => match scope {
             None => Ok(Permission::NetworkHttp(None)),
-            Some(value) => Ok(Permission::NetworkHttp(Some(host_list(
-                name, value, origin,
-            )?))),
+            Some(value) => Ok(Permission::NetworkHttp(Some(
+                StringSet::new(host_list(name, value, origin)?)
+                    .map_err(|e| bad(origin, format!("permission `{name}`: {}", e.message())))?,
+            ))),
         },
         "secrets_read" => match scope {
             None => Err(bad(
                 origin,
                 "permission `secrets_read` needs a `scope` naming the keys it reads",
             )),
-            Some(value) => Ok(Permission::SecretsRead(host_list(name, value, origin)?)),
+            Some(value) => Ok(Permission::SecretsRead(
+                StringSet::new(host_list(name, value, origin)?)
+                    .map_err(|e| bad(origin, format!("permission `{name}`: {}", e.message())))?,
+            )),
         },
         "process_spawn" => scopeless(Permission::ProcessSpawn, name, scope, origin),
         "session_read" => scopeless(Permission::SessionRead, name, scope, origin),
@@ -131,9 +137,10 @@ fn permission_from_raw(
         // spelled as an empty list. Unlike it, the entries are topic prefixes.
         "events_subscribe" => match scope {
             None => Ok(Permission::EventsSubscribe(None)),
-            Some(value) => Ok(Permission::EventsSubscribe(Some(topic_list(
-                name, value, origin,
-            )?))),
+            Some(value) => Ok(Permission::EventsSubscribe(Some(
+                TopicScope::new(topic_list(name, value, origin)?)
+                    .map_err(|e| bad(origin, format!("permission `{name}`: {}", e.message())))?,
+            ))),
         },
         "events_publish" => scopeless(Permission::EventsPublish, name, scope, origin),
         "job_manage" => scopeless(Permission::JobManage, name, scope, origin),
@@ -388,7 +395,7 @@ permission = "job_manage"
                 Permission::FsRead(FsScope::Anywhere),
                 Permission::FsWrite(FsScope::Subtree("docs/api".into())),
                 Permission::NetworkHttp(None),
-                Permission::SecretsRead(vec!["ACME_TOKEN".into()]),
+                Permission::SecretsRead(StringSet::new(["ACME_TOKEN".to_string()]).unwrap()),
                 Permission::ProcessSpawn,
                 Permission::SessionRead,
                 Permission::SessionWrite,
@@ -409,10 +416,9 @@ permission = "job_manage"
         .unwrap();
         assert_eq!(
             manifest.permissions,
-            [Permission::EventsSubscribe(Some(vec![
-                "tool.".into(),
-                "agent.run.".into()
-            ]))]
+            [Permission::EventsSubscribe(Some(
+                TopicScope::new(["tool.".to_string(), "agent.run.".to_string()]).unwrap()
+            ))]
         );
     }
 
@@ -457,10 +463,10 @@ permission = "job_manage"
         .unwrap();
         assert_eq!(
             manifest.permissions,
-            [Permission::NetworkHttp(Some(vec![
-                "api.openai.com".into(),
-                "api.deepseek.com".into()
-            ]))]
+            [Permission::NetworkHttp(Some(
+                StringSet::new(["api.openai.com".to_string(), "api.deepseek.com".to_string()])
+                    .unwrap()
+            ))]
         );
     }
 

@@ -194,17 +194,14 @@ fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
     if !record.permissions_computed {
         return "not evaluated (this plugin never passed validation)".to_string();
     }
-    // Canonical on *both* sides of *both* comparisons. `effective` holds what `meet`
-    // produced, which is canonical; `denied` holds what the manifest asked for, in the
-    // author's own order, because that is what `PluginRecord::denied` documents. So the
-    // spelling has to be normalised at the comparison rather than in either store --
-    // fixing only the `effective` branch made a permission the profile removed *whole*
-    // read as "narrowed", which is the reassuring direction and worse than the alarming
-    // one it replaced.
-    let wanted = wanted.canonicalised();
-    if record.denied.iter().any(|d| d.canonicalised() == wanted) {
+    // No normalisation here, and none needed: `StringSet` and `TopicScope` are canonical
+    // by construction, so `denied` (the manifest's own spelling) and `effective` (what
+    // `meet` produced) are directly comparable. Three commits fixed a missing
+    // `canonicalised()` at three call sites, this being the last of them; the newtypes
+    // removed the call sites instead.
+    if record.denied.contains(wanted) {
         format!("removed by profile `{profile}`")
-    } else if record.effective.contains(&wanted) {
+    } else if record.effective.contains(wanted) {
         "granted".to_string()
     } else {
         // Met, but not to what was asked for: the profile capped a wider request.
@@ -219,15 +216,17 @@ fn describe(permission: &Permission) -> String {
         Permission::FsWrite(scope) => format!("fs_write({})", fs_scope(scope)),
         Permission::ProcessSpawn => "process_spawn".to_string(),
         Permission::NetworkHttp(None) => "network_http(any host)".to_string(),
-        Permission::NetworkHttp(Some(hosts)) => format!("network_http({})", hosts.join(" ")),
+        Permission::NetworkHttp(Some(hosts)) => {
+            format!("network_http({})", hosts.as_slice().join(" "))
+        }
         Permission::SessionRead => "session_read".to_string(),
         Permission::SessionWrite => "session_write".to_string(),
         Permission::EventsSubscribe(None) => "events_subscribe(all topics)".to_string(),
         Permission::EventsSubscribe(Some(topics)) => {
-            format!("events_subscribe({})", topics.join(" "))
+            format!("events_subscribe({})", topics.as_slice().join(" "))
         }
         Permission::EventsPublish => "events_publish".to_string(),
-        Permission::SecretsRead(keys) => format!("secrets_read({})", keys.join(" ")),
+        Permission::SecretsRead(keys) => format!("secrets_read({})", keys.as_slice().join(" ")),
         Permission::JobManage => "job_manage".to_string(),
     }
 }
@@ -272,7 +271,7 @@ fn io(path: &Path, error: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use rivet_core::capability::{CapabilityVersion, PermissionSet};
+    use rivet_core::capability::{CapabilityVersion, PermissionSet, StringSet, TopicScope};
     use rivet_core::plugin::{PluginManifest, PluginState};
     use rivet_plugin::Origin;
 
@@ -371,13 +370,20 @@ mod tests {
         // the profile granted whole as "narrowed by profile" -- a lie in the alarming
         // direction, in the command an operator audits with.
         for wanted in [
-            Permission::NetworkHttp(Some(vec!["b.example.com".into(), "a.example.com".into()])),
-            Permission::EventsSubscribe(Some(vec!["tool.".into(), "agent.run.".into()])),
-            Permission::SecretsRead(vec!["B_TOKEN".into(), "A_TOKEN".into()]),
+            Permission::NetworkHttp(Some(
+                StringSet::new(["b.example.com".to_string(), "a.example.com".to_string()]).unwrap(),
+            )),
+            Permission::EventsSubscribe(Some(
+                TopicScope::new(["tool.".to_string(), "agent.run.".to_string()]).unwrap(),
+            )),
+            Permission::SecretsRead(
+                StringSet::new(["B_TOKEN".to_string(), "A_TOKEN".to_string()]).unwrap(),
+            ),
         ] {
             let mut record = record_asking_for(vec![wanted.clone()]);
             // What the loader stores: the meet against an unrestricted profile grant.
-            record.effective = PermissionSet::new([wanted.canonicalised()]);
+            // No `canonicalised()` to call any more -- `wanted` already is one.
+            record.effective = PermissionSet::new([wanted.clone()]);
 
             assert_eq!(
                 effect(&record, &wanted, "developer"),
@@ -398,14 +404,18 @@ mod tests {
         // No profile grants `secrets_read` at all, so every such manifest is removed in
         // full and the spelling is the only variable.
         for wanted in [
-            Permission::SecretsRead(vec!["B_TOKEN".into(), "A_TOKEN".into()]),
-            Permission::SecretsRead(vec!["A_TOKEN".into(), "B_TOKEN".into()]),
+            Permission::SecretsRead(
+                StringSet::new(["B_TOKEN".to_string(), "A_TOKEN".to_string()]).unwrap(),
+            ),
+            Permission::SecretsRead(
+                StringSet::new(["A_TOKEN".to_string(), "B_TOKEN".to_string()]).unwrap(),
+            ),
             // Absorption widens the surface: a *sorted* list can canonicalise to
             // something else too.
-            Permission::EventsSubscribe(Some(vec![
-                "agent.text.".into(),
-                "agent.text.delta".into(),
-            ])),
+            Permission::EventsSubscribe(Some(
+                TopicScope::new(["agent.text.".to_string(), "agent.text.delta".to_string()])
+                    .unwrap(),
+            )),
         ] {
             let mut record = record_asking_for(vec![wanted.clone()]);
             record.effective = PermissionSet::new([]);
@@ -433,11 +443,15 @@ mod tests {
             "network_http(any host)"
         );
         assert_eq!(
-            describe(&Permission::NetworkHttp(Some(vec!["a.test".into()]))),
+            describe(&Permission::NetworkHttp(Some(
+                StringSet::new(["a.test".to_string()]).unwrap()
+            ))),
             "network_http(a.test)"
         );
         assert_eq!(
-            describe(&Permission::SecretsRead(vec!["K".into()])),
+            describe(&Permission::SecretsRead(
+                StringSet::new(["K".to_string()]).unwrap()
+            )),
             "secrets_read(K)"
         );
         assert_eq!(describe(&Permission::JobManage), "job_manage");

@@ -299,8 +299,8 @@ pub enum Permission {
     FsRead(FsScope), FsWrite(FsScope), ProcessSpawn,
     NetworkHttp(Option<Vec<String>>),
     SessionRead, SessionWrite,
-    EventsSubscribe(Option<Vec<String>>), EventsPublish,
-    SecretsRead(Vec<String>), JobManage,
+    EventsSubscribe(Option<TopicScope>), EventsPublish,
+    SecretsRead(StringSet), JobManage,
 }
 ```
 

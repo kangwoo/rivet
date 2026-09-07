@@ -80,6 +80,133 @@ impl CapabilityKind {
 /// The permission set is a *closed vocabulary* on purpose. If a plugin needs something
 /// not expressible here, that is a signal to extend the contract deliberately, not to add
 /// an escape hatch.
+/// A set of exact strings — hosts, secret keys — canonical by construction.
+///
+/// Scope lists are sets. Carried as a bare `Vec` they are not: two orderings of one set
+/// are two values, `==` separates them, and every comparison in the codebase has to
+/// remember to normalise. It did not — three times, in three consecutive commits, in
+/// `allows`, in `plugin show`'s granted branch, and in its denied branch. So the
+/// normalisation moved to the only place that cannot be forgotten.
+///
+/// There is no way to build a non-canonical one, including through `Deserialize`, which
+/// goes through [`StringSet::new`] like every other caller.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct StringSet(Vec<String>);
+
+impl StringSet {
+    /// Sorted and deduplicated.
+    ///
+    /// # Errors
+    /// [`crate::error::ErrorKind::InvalidArgument`] for an empty set or an empty member.
+    /// An empty allowlist grants nothing, which is never what a manifest means; it should
+    /// leave the scope out instead.
+    pub fn new(items: impl IntoIterator<Item = String>) -> crate::Result<Self> {
+        let mut out: Vec<String> = items.into_iter().collect();
+        out.sort();
+        out.dedup();
+        if out.is_empty() {
+            return Err(crate::Error::invalid_argument(
+                "an empty scope list grants nothing; leave the scope out to ask for all",
+            ));
+        }
+        if out.iter().any(String::is_empty) {
+            return Err(crate::Error::invalid_argument(
+                "a scope list has an empty entry",
+            ));
+        }
+        Ok(Self(out))
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Already sorted and deduplicated, and known non-empty.
+    fn from_canonical(items: Vec<String>) -> Option<Self> {
+        (!items.is_empty()).then_some(Self(items))
+    }
+}
+
+impl<'de> Deserialize<'de> for StringSet {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(Vec::<String>::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A set of topic **prefixes**, canonical by construction.
+///
+/// As [`StringSet`], plus absorption: an entry another entry already covers admits no
+/// topic of its own, so `["tool.", "tool.execute."]` and `["tool."]` are one set and are
+/// stored as one value. Without that, `allows` — which asks whether the meet *equals* what
+/// was wanted — refused a grant strictly wider than the request.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct TopicScope(Vec<String>);
+
+impl TopicScope {
+    /// Sorted, deduplicated, and stripped of any prefix another entry covers.
+    ///
+    /// # Errors
+    /// [`crate::error::ErrorKind::InvalidArgument`] for an empty set or an empty prefix.
+    /// An empty prefix matches every topic — it would read as narrow and behave as "all" —
+    /// and an empty list means opposite things at either end: no overlap to the meet,
+    /// every topic to [`crate::event::topic_matches`].
+    pub fn new(prefixes: impl IntoIterator<Item = String>) -> crate::Result<Self> {
+        let mut sorted: Vec<String> = prefixes.into_iter().collect();
+        sorted.sort();
+        sorted.dedup();
+        if sorted.is_empty() {
+            return Err(crate::Error::invalid_argument(
+                "an empty topic scope matches every topic, which is the opposite of what \
+                 an empty list means elsewhere; leave the scope out to ask for all",
+            ));
+        }
+        if sorted.iter().any(String::is_empty) {
+            return Err(crate::Error::invalid_argument(
+                "a topic scope has an empty prefix, which matches every topic",
+            ));
+        }
+        Ok(Self(Self::absorb(&sorted)))
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Drop every entry a kept entry is already a prefix of.
+    ///
+    /// Sorted order puts a prefix immediately before everything it covers, so comparing
+    /// against the last kept entry is enough.
+    fn absorb(sorted: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(sorted.len());
+        for prefix in sorted {
+            if out
+                .last()
+                .is_none_or(|kept| !prefix.starts_with(kept.as_str()))
+            {
+                out.push(prefix.clone());
+            }
+        }
+        out
+    }
+
+    fn from_unsorted(mut items: Vec<String>) -> Option<Self> {
+        items.sort();
+        items.dedup();
+        let absorbed = Self::absorb(&items);
+        (!absorbed.is_empty()).then_some(Self(absorbed))
+    }
+}
+
+impl<'de> Deserialize<'de> for TopicScope {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(Vec::<String>::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "permission", content = "scope")]
 pub enum Permission {
@@ -90,7 +217,7 @@ pub enum Permission {
     /// Spawn processes.
     ProcessSpawn,
     /// Outbound HTTP. `None` means any host; otherwise an allowlist of host patterns.
-    NetworkHttp(Option<Vec<String>>),
+    NetworkHttp(Option<StringSet>),
     /// Read the session event log.
     SessionRead,
     /// Append to the session event log.
@@ -101,11 +228,11 @@ pub enum Permission {
     /// Scoped because [`crate::event::EventSubscriber::topics`] is the subscriber's own
     /// preference — it defaults to "everything" and nothing checks it. Without a scope
     /// here the grant is all-or-nothing, and `agent.text` carries the model's output.
-    EventsSubscribe(Option<Vec<String>>),
+    EventsSubscribe(Option<TopicScope>),
     /// Publish onto the event bus.
     EventsPublish,
     /// Read named secrets, by key.
-    SecretsRead(Vec<String>),
+    SecretsRead(StringSet),
     /// Read and write the job graph.
     JobManage,
 }
@@ -178,43 +305,6 @@ impl FsScope {
 }
 
 impl Permission {
-    /// Whether this permission is well-formed enough to be a grant.
-    ///
-    /// `EventsSubscribe(Some([]))` is spellable through `Deserialize` and means opposite
-    /// things at either end: `meet_topics` treats an empty result as *no overlap*, while
-    /// [`crate::event::topic_matches`] reads an empty filter list as *every topic*. The
-    /// TOML reader rejects it, but `PluginManifest` derives `Deserialize` and Phase 6's
-    /// out-of-process path goes through that, so the check belongs here too.
-    #[must_use]
-    pub fn is_well_formed(&self) -> bool {
-        match self {
-            Self::EventsSubscribe(Some(topics)) => {
-                !topics.is_empty() && !topics.iter().any(String::is_empty)
-            }
-            Self::NetworkHttp(Some(hosts)) => !hosts.is_empty(),
-            Self::SecretsRead(keys) => !keys.is_empty(),
-            Self::FsRead(scope) | Self::FsWrite(scope) => scope.is_valid(),
-            _ => true,
-        }
-    }
-
-    /// The same permission with every scope list sorted, deduplicated, and — for topic
-    /// prefixes — stripped of entries another entry already covers.
-    ///
-    /// Scope lists are sets carried as `Vec` and compared with `==`. This is what keeps
-    /// two spellings of one set from being two different permissions.
-    #[must_use]
-    pub fn canonicalised(&self) -> Self {
-        match self {
-            Self::NetworkHttp(Some(hosts)) => Self::NetworkHttp(Some(canonical(hosts))),
-            Self::EventsSubscribe(Some(topics)) => {
-                Self::EventsSubscribe(Some(canonical_topics(topics)))
-            }
-            Self::SecretsRead(keys) => Self::SecretsRead(canonical(keys)),
-            other => other.clone(),
-        }
-    }
-
     /// The most permission both grants allow, or `None` when they overlap in nothing.
     ///
     /// This is what makes [`PermissionSet::intersect`] a real meet rather than an exact
@@ -224,35 +314,32 @@ impl Permission {
     /// up with fewer permissions than a sloppy one.
     #[must_use]
     pub fn meet(&self, other: &Self) -> Option<Self> {
-        // A malformed scope grants nothing rather than being read as one of the two
-        // things an empty list could mean.
-        if !self.is_well_formed() || !other.is_well_formed() {
-            return None;
-        }
         match (self, other) {
             (Self::FsRead(a), Self::FsRead(b)) => a.meet(b).map(Self::FsRead),
             (Self::FsWrite(a), Self::FsWrite(b)) => a.meet(b).map(Self::FsWrite),
-            (Self::NetworkHttp(a), Self::NetworkHttp(b)) => {
-                match meet_allowlist(a.as_deref(), b.as_deref()) {
-                    HostMeet::AnyHost => Some(Self::NetworkHttp(None)),
-                    HostMeet::Hosts(hosts) => Some(Self::NetworkHttp(Some(hosts))),
-                    HostMeet::Disjoint => None,
+            (Self::NetworkHttp(a), Self::NetworkHttp(b)) => match (a, b) {
+                (None, None) => Some(Self::NetworkHttp(None)),
+                (None, Some(list)) | (Some(list), None) => {
+                    Some(Self::NetworkHttp(Some(list.clone())))
                 }
-            }
-            (Self::EventsSubscribe(a), Self::EventsSubscribe(b)) => {
-                match meet_topics(a.as_deref(), b.as_deref()) {
-                    TopicMeet::AllTopics => Some(Self::EventsSubscribe(None)),
-                    TopicMeet::Topics(topics) => Some(Self::EventsSubscribe(Some(topics))),
-                    TopicMeet::Disjoint => None,
+                (Some(x), Some(y)) => {
+                    StringSet::from_canonical(intersect_sorted(x.as_slice(), y.as_slice()))
+                        .map(|hosts| Self::NetworkHttp(Some(hosts)))
                 }
-            }
+            },
+            (Self::EventsSubscribe(a), Self::EventsSubscribe(b)) => match (a, b) {
+                (None, None) => Some(Self::EventsSubscribe(None)),
+                (None, Some(list)) | (Some(list), None) => {
+                    Some(Self::EventsSubscribe(Some(list.clone())))
+                }
+                (Some(x), Some(y)) => {
+                    TopicScope::from_unsorted(meet_prefixes(x.as_slice(), y.as_slice()))
+                        .map(|topics| Self::EventsSubscribe(Some(topics)))
+                }
+            },
             (Self::SecretsRead(a), Self::SecretsRead(b)) => {
-                let keys = intersect_sorted(a, b);
-                if keys.is_empty() {
-                    None
-                } else {
-                    Some(Self::SecretsRead(keys))
-                }
+                StringSet::from_canonical(intersect_sorted(a.as_slice(), b.as_slice()))
+                    .map(Self::SecretsRead)
             }
             // The remaining variants carry no scope: they meet only with themselves.
             (a, b) if a == b => Some(a.clone()),
@@ -276,108 +363,21 @@ fn is_contained(path: &str) -> bool {
             .any(|segment| segment == ".." || segment.is_empty())
 }
 
-/// The result of meeting two host allowlists.
-///
-/// Spelled as an enum rather than `Option<Option<Vec<String>>>` because the two "nothing"
-/// cases mean opposite things: `AnyHost` is the widest possible grant, `Disjoint` is no
-/// grant at all. Collapsing them would let an empty intersection read as "any host".
-enum HostMeet {
-    /// Neither side restricted hosts.
-    AnyHost,
-    /// The hosts both sides allow.
-    Hosts(Vec<String>),
-    /// The allowlists share nothing.
-    Disjoint,
-}
-
-/// `None` means "any host". The meet of any-host with a list is that list; the meet of
-/// two lists is their intersection, and an empty intersection means no overlap at all.
-fn meet_allowlist(a: Option<&[String]>, b: Option<&[String]>) -> HostMeet {
-    match (a, b) {
-        (None, None) => HostMeet::AnyHost,
-        (None, Some(list)) | (Some(list), None) => HostMeet::Hosts(canonical(list)),
-        (Some(x), Some(y)) => {
-            let hosts = intersect_sorted(x, y);
-            if hosts.is_empty() {
-                HostMeet::Disjoint
-            } else {
-                HostMeet::Hosts(hosts)
-            }
-        }
-    }
-}
-
-/// The result of meeting two topic scopes. Same three-way shape as [`HostMeet`], and for
-/// the same reason: "no restriction" and "no overlap" are opposites.
-enum TopicMeet {
-    AllTopics,
-    Topics(Vec<String>),
-    Disjoint,
-}
-
-/// `None` means "every topic". Otherwise the operands are **prefixes**, so this is not the
-/// set intersection [`meet_allowlist`] computes for hosts.
+/// Every prefix admitted by both sides, before absorption.
 ///
 /// Two prefixes admit a common topic only when one is a prefix of the other, and then the
-/// longer one is exactly the set of topics both allow: `tool.` met with `tool.execute.` is
-/// `tool.execute.`, while `tool.` met with `run.` is nothing. Taking the string
-/// intersection instead would drop `tool.execute.` on the floor and silently widen or
-/// narrow depending on which side spelled what.
-fn meet_topics(a: Option<&[String]>, b: Option<&[String]>) -> TopicMeet {
-    match (a, b) {
-        (None, None) => TopicMeet::AllTopics,
-        (None, Some(list)) | (Some(list), None) => TopicMeet::Topics(canonical_topics(list)),
-        (Some(x), Some(y)) => {
-            let mut topics = Vec::new();
-            for p in x {
-                for q in y {
-                    if q.starts_with(p.as_str()) {
-                        topics.push(q.clone());
-                    } else if p.starts_with(q.as_str()) {
-                        topics.push(p.clone());
-                    }
-                }
+/// longer one is exactly the set both allow: `tool.` with `tool.execute.` gives
+/// `tool.execute.`, while `tool.` with `run.` gives nothing. This is *not* the string
+/// intersection [`intersect_sorted`] computes for exact-match hosts and keys.
+fn meet_prefixes(a: &[String], b: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in a {
+        for q in b {
+            if q.starts_with(p.as_str()) {
+                out.push(q.clone());
+            } else if p.starts_with(q.as_str()) {
+                out.push(p.clone());
             }
-            let topics = canonical_topics(&topics);
-            if topics.is_empty() {
-                TopicMeet::Disjoint
-            } else {
-                TopicMeet::Topics(topics)
-            }
-        }
-    }
-}
-
-/// Sorted and deduplicated: the form every scope list is compared in.
-///
-/// A scope list is a *set*. Without a canonical form, `PermissionSet::allows` — which
-/// asks whether the meet equals what was wanted — refuses a grant identical to the one
-/// held, purely because the two spelled it in a different order.
-fn canonical(list: &[String]) -> Vec<String> {
-    let mut out = list.to_vec();
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// [`canonical`], plus dropping any prefix another entry already covers.
-///
-/// Only valid for prefixes: `["tool.", "tool.execute."]` and `["tool."]` admit the same
-/// topics, so carrying both makes two spellings of one set — and `allows`, which asks
-/// whether the meet *equals* what was wanted, then refuses a grant strictly wider than the
-/// request. Hosts and secret keys are exact strings, so this must not be applied to them:
-/// `a.example` does not cover `a.example.net`.
-fn canonical_topics(list: &[String]) -> Vec<String> {
-    let sorted = canonical(list);
-    let mut out: Vec<String> = Vec::with_capacity(sorted.len());
-    for topic in sorted {
-        // Sorted order puts a prefix before anything it covers, so checking the last kept
-        // entry is enough.
-        if out
-            .last()
-            .is_none_or(|kept| !topic.starts_with(kept.as_str()))
-        {
-            out.push(topic);
         }
     }
     out
@@ -433,12 +433,9 @@ impl PermissionSet {
     /// `FsRead(Workspace)` allows `FsRead(Subtree("docs"))`, but not the reverse.
     #[must_use]
     pub fn allows(&self, wanted: &Permission) -> bool {
-        // Against the canonical form: `meet` returns scope lists sorted, so comparing
-        // with a caller's ordering would refuse a permission identical to one held.
-        let wanted = wanted.canonicalised();
         self.granted
             .iter()
-            .any(|held| held.meet(&wanted).as_ref() == Some(&wanted))
+            .any(|held| held.meet(wanted).as_ref() == Some(wanted))
     }
 
     /// Meet two grants. Used to narrow a plugin's manifest request by the active profile,
@@ -466,91 +463,72 @@ impl PermissionSet {
 mod tests {
     use super::*;
 
-    /// A scope list is a set, so the order it was written in must not decide the answer.
-    ///
-    /// Found by probing `allows` with a grant identical to the one held: `meet` returns
-    /// scope lists sorted, so comparing against a caller's ordering refused it. The bug
-    /// predated topic scopes — `network_http` and `secrets_read` had it too — and the
-    /// documented manifest example `["tool.", "agent.run."]` hit it under any profile
-    /// whose own grant is a list.
-    #[test]
-    fn a_scope_list_is_a_set_whatever_order_it_was_written_in() {
-        let unsorted = vec!["b.".to_string(), "a.".to_string()];
-        let sorted = vec!["a.".to_string(), "b.".to_string()];
+    fn topics(list: &[&str]) -> TopicScope {
+        TopicScope::new(list.iter().map(|s| (*s).to_string())).expect("valid topic scope")
+    }
 
-        for (held, wanted) in [
-            (unsorted.clone(), unsorted.clone()),
-            (sorted.clone(), unsorted.clone()),
-            (unsorted.clone(), sorted.clone()),
+    fn strings(list: &[&str]) -> StringSet {
+        StringSet::new(list.iter().map(|s| (*s).to_string())).expect("valid string set")
+    }
+
+    /// The property that used to live in three comparisons now lives in one constructor.
+    ///
+    /// `allows` asks whether the meet *equals* what was wanted, and `plugin show` compares
+    /// against `effective` and `denied`. Each needed the operands normalised, each was
+    /// fixed separately, and the third fix broke the second. None of them normalises
+    /// anything now, because a non-canonical scope cannot be built.
+    #[test]
+    fn a_scope_list_is_canonical_at_construction() {
+        // Order, duplicates: one set, one value.
+        let a = StringSet::new(["b".to_string(), "a".to_string(), "b".to_string()]).unwrap();
+        let b = StringSet::new(["a".to_string(), "b".to_string()]).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.as_slice(), ["a", "b"]);
+
+        // Prefixes additionally absorb: these three spell the same set of topics.
+        let wide = TopicScope::new(["tool.".to_string()]).unwrap();
+        for spelling in [
+            vec!["tool.".to_string(), "tool.execute.".to_string()],
+            vec!["tool.execute.".to_string(), "tool.".to_string()],
+            vec!["tool.".to_string(), "tool.execute.started".to_string()],
         ] {
-            let set = PermissionSet::new(vec![Permission::EventsSubscribe(Some(held))]);
-            assert!(set.allows(&Permission::EventsSubscribe(Some(wanted))));
+            assert_eq!(TopicScope::new(spelling).unwrap(), wide);
         }
 
-        // The variants that had the bug before topics existed.
-        let hosts = PermissionSet::new(vec![Permission::NetworkHttp(Some(unsorted.clone()))]);
-        assert!(hosts.allows(&Permission::NetworkHttp(Some(unsorted.clone()))));
-        let keys = PermissionSet::new(vec![Permission::SecretsRead(unsorted.clone())]);
-        assert!(keys.allows(&Permission::SecretsRead(unsorted)));
-
-        // And a duplicate is not a different set either.
-        let dupes = PermissionSet::new(vec![Permission::EventsSubscribe(Some(vec![
-            "a.".into(),
-            "a.".into(),
-        ]))]);
-        assert!(dupes.allows(&Permission::EventsSubscribe(Some(vec!["a.".into()]))));
+        // And so the comparison that needed normalising three times does not.
+        let held = PermissionSet::new(vec![Permission::EventsSubscribe(Some(
+            TopicScope::new(["tool.".to_string(), "tool.execute.".to_string()]).unwrap(),
+        ))]);
+        assert!(held.allows(&Permission::EventsSubscribe(Some(wide))));
     }
 
-    /// A grant wider than the request must not be refused for carrying a redundant entry.
+    /// The two values that meant opposite things at either end are unconstructible.
     #[test]
-    fn a_prefix_absorbs_the_entries_it_already_covers() {
-        // `["tool.", "tool.execute."]` admits exactly the topics `["tool."]` admits, so
-        // the two are one set. Before this, `allows` re-emitted the extension and the
-        // comparison failed against a grant that was strictly wider than the request.
-        let held = PermissionSet::new(vec![Permission::EventsSubscribe(Some(vec![
-            "tool.".into(),
-            "tool.execute.".into(),
-        ]))]);
-        assert!(held.allows(&Permission::EventsSubscribe(Some(vec!["tool.".into()]))));
-        assert!(held.allows(&Permission::EventsSubscribe(Some(vec![
-            "tool.execute.".into()
-        ]))));
+    fn an_empty_or_blank_scope_cannot_be_built() {
+        // Empty list: "no overlap" to the meet, "every topic" to `topic_matches`.
+        assert!(TopicScope::new(Vec::new()).is_err());
+        assert!(StringSet::new(Vec::new()).is_err());
+        // Empty entry: reads as narrow, matches everything.
+        assert!(TopicScope::new([String::new()]).is_err());
+        assert!(StringSet::new([String::new()]).is_err());
 
-        // Absorption is for prefixes only. Hosts are exact strings.
-        let hosts = PermissionSet::new(vec![Permission::NetworkHttp(Some(vec![
-            "a.example".into(),
-            "a.example.net".into(),
-        ]))]);
-        assert!(hosts.allows(&Permission::NetworkHttp(Some(vec!["a.example.net".into()]))));
-        assert!(!hosts.allows(&Permission::NetworkHttp(Some(vec!["b.example".into()]))));
-    }
-
-    /// An empty topic list means "everything" to `topic_matches` and "nothing" to the
-    /// meet. It must not be usable as a grant while those two disagree.
-    #[test]
-    fn an_empty_scope_list_grants_nothing() {
-        let empty = Permission::EventsSubscribe(Some(Vec::new()));
-        assert!(!empty.is_well_formed());
-        assert_eq!(empty.meet(&Permission::EventsSubscribe(None)), None);
-
-        let set = PermissionSet::new(vec![empty.clone()]);
-        assert!(!set.allows(&Permission::EventsSubscribe(Some(vec!["tool.".into()]))));
-        assert!(!set.allows(&empty));
-
-        // And it is reachable, which is why the check is here and not only in the parser.
-        let parsed: Permission =
-            serde_json::from_str(r#"{"permission":"events_subscribe","scope":[]}"#)
-                .expect("the wire form is representable");
-        assert!(!parsed.is_well_formed());
+        // Including through `Deserialize`, which is the door Phase 6 comes in by.
+        for wire in ["[]", r#"[""]"#, r#"["tool.", ""]"#] {
+            assert!(
+                serde_json::from_str::<TopicScope>(wire).is_err(),
+                "`{wire}` must not deserialize"
+            );
+        }
+        assert!(serde_json::from_str::<TopicScope>(r#"["tool."]"#).is_ok());
     }
 
     /// Topic scopes are prefixes, so their meet is not the set intersection hosts get.
     #[test]
     fn topic_scopes_meet_on_the_narrower_prefix() {
         let all = Permission::EventsSubscribe(None);
-        let tools = Permission::EventsSubscribe(Some(vec!["tool.".into()]));
-        let executes = Permission::EventsSubscribe(Some(vec!["tool.execute.".into()]));
-        let runs = Permission::EventsSubscribe(Some(vec!["run.".into()]));
+        let tools = Permission::EventsSubscribe(Some(topics(&["tool."])));
+        let executes = Permission::EventsSubscribe(Some(topics(&["tool.execute."])));
+        let runs = Permission::EventsSubscribe(Some(topics(&["run."])));
 
         // Unrestricted meets a list to that list, in either order.
         assert_eq!(all.meet(&tools), Some(tools.clone()));
@@ -569,19 +547,19 @@ mod tests {
     /// reachable through a grant that names its siblings.
     #[test]
     fn a_sibling_prefix_does_not_admit_agent_text() {
-        let narrowed = Permission::EventsSubscribe(Some(vec![
-            "agent.request.".into(),
-            "agent.run.".into(),
-            "agent.turn.".into(),
-        ]));
-        let wants_text = Permission::EventsSubscribe(Some(vec!["agent.text.".into()]));
+        let narrowed = Permission::EventsSubscribe(Some(topics(&[
+            "agent.request.",
+            "agent.run.",
+            "agent.turn.",
+        ])));
+        let wants_text = Permission::EventsSubscribe(Some(topics(&["agent.text."])));
         assert_eq!(narrowed.meet(&wants_text), None);
 
         let set = PermissionSet::new(vec![narrowed]);
         assert!(!set.allows(&wants_text));
-        assert!(set.allows(&Permission::EventsSubscribe(Some(vec![
-            "agent.run.completed".into()
-        ]))));
+        assert!(set.allows(&Permission::EventsSubscribe(Some(topics(&[
+            "agent.run.completed"
+        ])))));
     }
 
     #[test]
@@ -682,17 +660,17 @@ mod tests {
 
     #[test]
     fn network_allowlists_intersect() {
-        let plugin = PermissionSet::new([Permission::NetworkHttp(Some(vec![
-            "api.openai.com".into(),
-            "evil.test".into(),
-        ]))]);
-        let profile = PermissionSet::new([Permission::NetworkHttp(Some(vec![
-            "api.openai.com".into(),
-            "api.anthropic.com".into(),
-        ]))]);
+        let plugin = PermissionSet::new([Permission::NetworkHttp(Some(strings(&[
+            "api.openai.com",
+            "evil.test",
+        ])))]);
+        let profile = PermissionSet::new([Permission::NetworkHttp(Some(strings(&[
+            "api.openai.com",
+            "api.anthropic.com",
+        ])))]);
         assert_eq!(
             plugin.intersect(&profile).granted(),
-            [Permission::NetworkHttp(Some(vec!["api.openai.com".into()]))]
+            [Permission::NetworkHttp(Some(strings(&["api.openai.com"])))]
         );
     }
 
@@ -700,24 +678,24 @@ mod tests {
     fn any_host_is_capped_by_an_allowlist() {
         let plugin = PermissionSet::new([Permission::NetworkHttp(None)]);
         let profile =
-            PermissionSet::new([Permission::NetworkHttp(Some(vec!["api.openai.com".into()]))]);
+            PermissionSet::new([Permission::NetworkHttp(Some(strings(&["api.openai.com"])))]);
         assert_eq!(
             plugin.intersect(&profile).granted(),
-            [Permission::NetworkHttp(Some(vec!["api.openai.com".into()]))],
+            [Permission::NetworkHttp(Some(strings(&["api.openai.com"])))],
             "`any host` must not survive a profile that names hosts"
         );
     }
 
     #[test]
     fn secret_keys_intersect() {
-        let plugin = PermissionSet::new([Permission::SecretsRead(vec!["OPENAI_API_KEY".into()])]);
-        let profile = PermissionSet::new([Permission::SecretsRead(vec![
-            "OPENAI_API_KEY".into(),
-            "OTHER".into(),
-        ])]);
+        let plugin = PermissionSet::new([Permission::SecretsRead(strings(&["OPENAI_API_KEY"]))]);
+        let profile = PermissionSet::new([Permission::SecretsRead(strings(&[
+            "OPENAI_API_KEY",
+            "OTHER",
+        ]))]);
         assert_eq!(
             plugin.intersect(&profile).granted(),
-            [Permission::SecretsRead(vec!["OPENAI_API_KEY".into()])]
+            [Permission::SecretsRead(strings(&["OPENAI_API_KEY"]))]
         );
     }
 
