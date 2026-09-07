@@ -46,9 +46,23 @@ pub async fn start(
     // `rivet session list` forever.
     config.check_credentials()?;
     // The bus, the observer and `runtime.started` all come before `catalog::load`, so the
-    // whole plugin lifecycle happens with somebody listening. Today it happens in an empty
-    // room and `--jsonl` never carries a `plugin.*` line at all.
+    // whole plugin lifecycle happens with somebody listening. Before Phase 3 the observer
+    // went on afterwards, so it happened in an empty room and `--jsonl` carried no
+    // `plugin.*` line at all.
     let mut watching = observe(output)?;
+    let result = started(config, prompt, output, &mut watching).await;
+    // Every path out of the run, the failing ones included. See [`Watching::finish`].
+    watching.finish().await;
+    result
+}
+
+/// [`start`] with the observers already attached, so its `?`s have somewhere to land.
+async fn started(
+    config: &Config,
+    prompt: &str,
+    output: Output,
+    watching: &mut Watching,
+) -> rivet_core::Result<RunSummary> {
     let mut host = catalog::load(config, watching.bus.clone()).await?;
     let store = Arc::new(JsonlSessionStore::new(&config.sessions_dir));
 
@@ -73,7 +87,7 @@ pub async fn start(
         state,
         Some(Message::user(prompt)),
         output,
-        &mut watching,
+        watching,
     )
     .await
 }
@@ -87,6 +101,29 @@ struct Watching {
     /// loop draws, so the two halves have to be the same value.
     tui: Option<Arc<Tui>>,
     intents: Option<mpsc::Receiver<Intent>>,
+}
+
+impl Watching {
+    /// Deliver everything published so far, then stop the host's own consumers.
+    ///
+    /// Called on the way out of a run *and* on every path that never reaches one. The
+    /// second is the one worth spelling out: `catalog::load` publishes `plugin.discovered`,
+    /// `plugin.load.failed` and the rollback that follows it, and a `?` that merely dropped
+    /// `Watching` would hit [`rivet_runtime::Observer`]'s `Drop`, which **aborts** the pump
+    /// rather than draining it. So `--jsonl` lost its last and most useful lines at exactly
+    /// the moment an operator is reading the stream for them.
+    ///
+    /// Idempotent: [`drive`] takes the observers for its own drain, and what is left behind
+    /// drains to `Complete` at once.
+    async fn finish(&mut self) {
+        let observers = std::mem::take(&mut self.observers);
+        if let Drained::Truncated { budget_ms } = observers.drain_within(DRAIN_BUDGET).await {
+            eprintln!(
+                "rivet: the event stream was cut off after {budget_ms}ms; \
+                 its last lines are missing"
+            );
+        }
+    }
 }
 
 /// Make the bus, attach the host's renderer, and announce the runtime — in that order.
@@ -163,21 +200,27 @@ pub async fn resume(
         }
         rivet_runtime::session_recovery::ResumePlan::Continue => {
             let mut watching = observe(output)?;
-            let mut host = catalog::load(config, watching.bus.clone()).await?;
-            let summary = drive(
-                config,
-                &mut host,
-                store,
-                session_id,
-                state,
-                None,
-                output,
-                &mut watching,
-            )
-            .await?;
-            Ok(Some(summary))
+            let result = resumed(config, store, session_id, state, output, &mut watching).await;
+            watching.finish().await;
+            Ok(Some(result?))
         }
     }
+}
+
+/// [`resume`] with the observers already attached, so its `?`s have somewhere to land.
+async fn resumed(
+    config: &Config,
+    store: Arc<JsonlSessionStore>,
+    session_id: SessionId,
+    state: SessionState,
+    output: Output,
+    watching: &mut Watching,
+) -> rivet_core::Result<RunSummary> {
+    let mut host = catalog::load(config, watching.bus.clone()).await?;
+    drive(
+        config, &mut host, store, session_id, state, None, output, watching,
+    )
+    .await
 }
 
 /// Refuse to replay a session that was recorded somewhere else.
@@ -269,16 +312,15 @@ async fn drive(
     host.loader.unload_all().await;
 
     // Everything is published. Hand it over -- rather than sleeping 20 ms and aborting,
-    // which made the tail of the stream a matter of scheduler luck.
-    let observers = std::mem::take(&mut watching.observers);
-    if let Drained::Truncated { budget_ms } = observers.drain_within(DRAIN_BUDGET).await {
-        eprintln!(
-            "rivet: the event stream was cut off after {budget_ms}ms;              its last lines are missing"
-        );
-    }
+    // which made the tail of the stream a matter of scheduler luck. Before the summary, so
+    // the summary is the last thing on the screen rather than a line the stream runs over.
+    watching.finish().await;
 
     let summary = summary?;
-    if output == Output::Human {
+    // Not `Jsonl`: that stream is for a machine and a prose footer would be a parse error.
+    // `Tui` prints it like `Human` does -- the terminal has been restored by now, so it
+    // lands on the real screen, which is what the alternate screen going away is for.
+    if output != Output::Jsonl {
         report(&summary);
     }
     Ok(summary)

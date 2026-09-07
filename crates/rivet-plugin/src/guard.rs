@@ -302,22 +302,29 @@ impl PluginRegistry for GuardedRegistry {
         // so a grant that silently removes part of what a subscriber asked for still
         // leaves a line behind.
         if let Some(effective) = &topics {
-            // Compare by coverage, not by list: `TopicScope` sorts and absorbs, so the
-            // same set comes back in a different order and with covered entries folded
-            // away. Only a prefix the effective scope does not admit at all was lost.
-            let lost: Vec<&String> = wanted
+            // Compare by coverage, not by list: `TopicScope` sorts and absorbs, so the same
+            // set comes back in a different order and with covered entries folded away.
+            //
+            // Coverage, and not mere overlap. A prefix survives whole only if the effective
+            // scope holds something `asked` itself starts with; anything *narrower* keeps a
+            // slice of it and drops the rest. `agent.` under a narrowed profile is the case
+            // that matters -- it comes back as `agent.request.`, `agent.run.`, `agent.turn.`
+            // with `agent.text.` gone, which overlaps and is not the same thing. That is the
+            // silent narrowing this line exists to leave a trace of.
+            let narrowed: Vec<&String> = wanted
                 .iter()
                 .filter(|asked| {
-                    !effective.as_slice().iter().any(|held| {
-                        asked.starts_with(held.as_str()) || held.starts_with(asked.as_str())
-                    })
+                    !effective
+                        .as_slice()
+                        .iter()
+                        .any(|held| asked.starts_with(held.as_str()))
                 })
                 .collect();
-            if !lost.is_empty() {
+            if !narrowed.is_empty() {
                 tracing::debug!(
                     plugin = %self.plugin_id,
                     subscriber = %name,
-                    lost = ?lost,
+                    narrowed = ?narrowed,
                     receiving = ?effective.as_slice(),
                     "the grant narrowed a subscriber's topics"
                 );

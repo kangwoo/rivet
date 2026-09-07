@@ -230,7 +230,11 @@ async fn a_run_publishes_every_agent_and_tool_topic_this_phase_owns() {
 #[tokio::test]
 async fn a_host_lifecycle_publishes_every_runtime_and_plugin_topic_this_phase_owns() {
     // The host half of 3.1, without a loop: start, discover, load (one of them failing),
-    // unload, shut down. `plugin.*` comes from the loader; `runtime.*` from `lifecycle`.
+    // unload, shut down. `runtime.*` goes through `lifecycle`, which is what this crate
+    // owns. The `plugin.*` envelopes are hand-made -- the loader lives in `rivet-plugin`
+    // and depending on it here would invert the arrow -- so what is asserted about them is
+    // the *order* they have to arrive in, not that anything published them. `rivet-cli`'s
+    // `jsonl_carries_the_whole_lifecycle_not_just_the_answer` drives the real loader.
     let bus = BroadcastBus::new();
     let (recorder, observer) = {
         let recorder = Arc::new(support::Recorder::default());
@@ -421,8 +425,10 @@ async fn a_lagging_subscriber_is_reported_by_name_on_the_bus() {
 
 #[tokio::test]
 async fn runtime_started_precedes_everything_it_would_describe() {
-    // `--jsonl`'s first line. Today's ordering puts the observer on after `catalog::load`,
-    // which means the whole plugin lifecycle happens in an empty room.
+    // `--jsonl`'s first line, and the ordering `lifecycle`'s module doc makes a contract:
+    // `started` before anything it would describe. The wiring that keeps it is `run.rs`'s
+    // (bus, observer, `runtime.started`, then `catalog::load`) and the e2e asserts that;
+    // what this pins is the half `rivet-runtime` owns.
     let bus = BroadcastBus::new();
     let recorder = Arc::new(support::Recorder::default());
     let observer = bus.observe(recorder.clone());

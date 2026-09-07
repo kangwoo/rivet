@@ -249,10 +249,11 @@ impl Profile {
     /// which streams the model's output verbatim — a plugin that may not write code has no
     /// business receiving the whole conversation.
     ///
-    /// **Not enforced yet.** `BroadcastBus::attach` filters on the subscriber's own
-    /// `topics()`, which defaults to everything, and reads no permission. This value is
-    /// the vocabulary Phase 3 wires at `attach_subscriber`; deciding it first is what
-    /// keeps Phase 3 from building on a bare variant. See `docs/architecture.md` §11-10.
+    /// **Enforced since Phase 3.** `GuardedRegistry::register_subscriber` meets this with
+    /// what the subscriber asked for, and the pump delivers the result — so a plugin under
+    /// a narrowed profile no longer receives `agent.text.delta` merely by defaulting its
+    /// own `topics()` to the empty list. See `docs/architecture.md` §11-10, and
+    /// `a_readonly_profile_keeps_the_conversation_from_a_subscriber` for the test.
     ///
     /// The exclusion is spelled by naming `agent.text`'s siblings because topic scopes are
     /// prefixes and prefixes cannot express "not". That is worth the verbosity: a topic
