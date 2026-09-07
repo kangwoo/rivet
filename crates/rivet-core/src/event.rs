@@ -321,6 +321,13 @@ pub trait EventSubscriber: Send + Sync + fmt::Debug {
     async fn on_event(&self, envelope: &EventEnvelope);
 }
 
+/// Topics are also what [`crate::capability::Permission::EventsSubscribe`] scopes over, and
+/// the narrowed profiles are granted by *enumerating* prefixes rather than excluding one —
+/// prefixes cannot express "not". So a topic added under an existing namespace is not
+/// granted to `readonly`, `reviewer` or `production` until somebody adds it there. That is
+/// the safe direction, and this is the note that says so at the place a topic is minted:
+/// see `Profile::subscribable_topics` in `rivet-cli`.
+///
 /// Whether a topic filter matches a topic.
 #[must_use]
 pub fn topic_matches(filters: &[String], topic: &str) -> bool {

@@ -378,12 +378,20 @@ Policy가 순수 함수여야 하는 이유도 이것이다: 감사 시점에 �
 rivet --profile readonly "왜 이 테스트가 실패하지?"
 ```
 
-**이벤트 구독은 프로파일이 실제로 좁힌다.** `developer`·`ci`는 모든 토픽을 받고,
-`readonly`·`reviewer`·`production`은 `agent.text`를 뺀 나머지만 받는다 —
-`agent.text.delta`가 모델 출력 전문을 나르고, 코드를 고칠 수 없는 에이전트가 대화
-전문까지 받을 이유는 없다. `EventSubscriber::topics()`는 구독자 **자신의** 선호라
-(기본값이 "전부") 이 grant가 유일한 결정권자다. 자세한 것은
-[`architecture.md` §11-10](./architecture.md).
+> **⚠ `events_subscribe`의 scope는 아직 선언이지 강제가 아니다.** `fs_read`와 같은
+> 자리에 있다 (아래 §"권한" 참조).
+>
+> 어휘와 프로파일 grant는 있다 — `developer`·`ci`는 모든 토픽, `readonly`·`reviewer`·
+> `production`은 `agent.text`를 뺀 나머지다. 그런데 **배달 경로가 그 grant를 읽지
+> 않는다.** `BroadcastBus::attach`는 `EventSubscriber::topics()`로 거르고, 그건 구독자
+> **자신의** 선호이며 기본값인 빈 목록을 `topic_matches`가 "전부"로 읽는다. 그래서
+> `events_subscribe(["tool."])`만 가진 plugin도 `agent.text.delta`를 받고, 심지어
+> `events_subscribe`를 선언하지 않아도 구독할 수 있다.
+>
+> 배선은 **Phase 3**이다 — 3.2가 `EventSubscriber` 등록과 토픽 필터를 다루는 항목이고,
+> `attach_subscriber`가 그 이음매다. 여기서 어휘를 먼저 정한 이유는 Phase 3이 맨몸
+> permission 위에 짓지 않게 하려는 것이다. 자세한 것은
+> [`architecture.md` §11-10](./architecture.md).
 
 > **⚠ `network` 열은 아직 어느 프로파일에서도 강제되지 않는다.** 그리고 Phase 2 기준으로
 > 프로파일은 **provider 호출과 도구 egress를 구분하지 못한다.**

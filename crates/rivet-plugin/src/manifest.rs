@@ -154,6 +154,20 @@ fn topic_list(
     value: &toml::Value,
     origin: Option<&Origin>,
 ) -> rivet_core::Result<Vec<String>> {
+    // `host_list` rejects an empty list too, but for the opposite reason: for hosts an
+    // empty allowlist grants nothing, while an empty *topic* filter is read by
+    // `topic_matches` as every topic. Same refusal, and the message it carries is about
+    // hosts, so say the topic reason here.
+    let value_is_empty = matches!(value, toml::Value::Array(items) if items.is_empty());
+    if value_is_empty {
+        return Err(bad(
+            origin,
+            format!(
+                "permission `{name}` has an empty `scope`; an empty topic filter matches \
+                 every topic, so leave `scope` out to ask for all of them"
+            ),
+        ));
+    }
     let topics = host_list(name, value, origin)?;
     if topics.iter().any(String::is_empty) {
         return Err(bad(
