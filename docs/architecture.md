@@ -731,6 +731,34 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    Phase 2에서 **선언**이며, 도구별 경로 범위를 실제로 강제하는 것은 Phase 4의 sandbox다.
    파서가 탈출 서브트리를 지금 거부하는 것은 그 강제가 붙을 때 어휘가 이미 정확하도록
    하기 위한 것이다. 근거: PR #1 리뷰 2라운드 question 1.
+14. **등록 창구는 capability의 *존재*를 닫지 *내용*을 닫지 않는다** — Phase 2의 봉인은
+   `load`가 반환된 뒤의 `register_*`를 거부한다. 그런데 plugin이 자기 `Arc<dyn Tool>`을
+   계속 들고 있으면 **이미 등록된** tool의 description과 JSON schema를 나중에 바꿀 수
+   있다. `agent_loop.rs:366`과 `dispatch.rs:204`는 `spec()`을 호출 시점에 부르는 반면
+   `schema::validate_spec`은 `register_tool` 안에서만 돌기 때문에, `validate_spec`이
+   거부했을 spec으로 바꾸는 것까지 통과한다. 드러나는 곳도 없다 — `record.registered`,
+   `rivet plugin list`, `rivet doctor`는 전부 이름만 보고 레지스트리 키는 삽입 시점에
+   고정됐다. 즉 창구를 우회하는 경로가 capability를 *추가*하는 쪽에는 없고 *내용*을
+   바꾸는 쪽에는 있다. 등록 회계가 목표인 Phase 2의 범위 밖으로 뒀지만, 창구가 다음에
+   닫아야 할 것이 이것인지 — 등록 시점 검증 대신 spec을 등록 시점에 **고정**하는
+   쪽인지 — 는 tool spec이 실제로 모델에 나가는 경로를 다시 여는 Phase 4에서 정한다.
+   근거: [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) §8-4,
+   PR #1 리뷰 3라운드 question 1.
+15. **`load` 안에서 기다리는 것 말고 방법이 없어졌는데 `load`에는 데드라인이 없다** —
+   창구가 닫히면서 "연결이 선 다음에 등록한다"는 형태가 사라졌다. 남은 방법은 그 연결을
+   `Plugin::load` 안에서 기다리는 것 하나뿐이고(`plugin.md` §4.1), 로더는 `load`에
+   타임아웃을 걸지 않는다. 그래서 백엔드에 닿지 못하는 plugin이 "조용히 등록을 안 하는
+   plugin"에서 **"아예 뜨지 않는 호스트"**로 바뀌었다 — `rivet run`이 시작 지점에서
+   메시지도 `FAILED` 레코드도 없이 매달린다. 같은 구멍이 plugin이 띄운 태스크에도 있다:
+   `seal`은 진행 중인 등록을 기다려 내므로 그 등록 안의 `spec()`이 멈추면 `load`가
+   멈춘다 (측정: 2 s 블로킹 → `load` 4.007 s). 데드라인은 **로더 몫이다** — 기다림을
+   강제한 쪽이 로더이고, plugin은 자기 `load`가 언제 포기해야 하는지 알 방법이 없다.
+   Phase 2에서는 설계가 지정하지 않은 예산을 발명하지 않으려고 열어 뒀다. 늦어도
+   프로세스 경계 때문에 "닿지 않는 상대"가 예외가 아니라 일상이 되는 Phase 6 전에는
+   닫아야 하고, 그때 정할 것은 숫자만이 아니라 초과했을 때의 상태다 (`FAILED` 레코드인가,
+   호스트 중단인가). 근거:
+   [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) §8-4,
+   PR #1 리뷰 3라운드 question 3 · non-blocking 2.
 
 ---
 

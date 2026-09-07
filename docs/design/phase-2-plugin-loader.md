@@ -634,12 +634,44 @@ waits out the registrations already in flight. With a flag, one that had passed 
 could still land after the loader read `observed()` — a capability accepted by the registry
 and missing from `record.registered`, which is the same bug in a smaller window.
 
-§5 row 10 says a panic inside a task the plugin spawned is not caught. That is still true,
-and is now the *only* thing such a task can do that outlives the phase's guarantees.
+§5 row 10 says a panic inside a task the plugin spawned is not caught. That is still true.
+It is no longer the *only* thing such a task can do that outlives the phase's guarantees,
+which is what this section claimed until review-3 measured otherwise: `seal` waits out the
+registrations in flight, and a registration holds the window open across `tool.spec()` and
+the registry call, both of which run plugin code. A spawned task whose `spec()` blocked for
+2 s made `PluginLoader::load` return after 4.007 s instead of ~50 ms; substitute "never
+returns" and `rivet run` hangs at startup with no message and no `FAILED` record. This is
+not a new *capability* — a plugin that wants to hang the host can hang in `load`, and
+in-process plugins are trusted — but it is a new *place*, and it widens the no-timeout gap
+below from `Plugin::load`/`unload` to any registration a task they spawned has in flight.
+No deadline was added here: a budget the design never specified is a behaviour change with
+its own failure modes. Whose it is, and what exceeding it should leave behind, is
+`architecture.md` §11-15.
 
-Covered by `a_registration_from_a_task_outliving_a_failed_load_is_refused` and
-`a_plugin_that_registers_from_unload_does_not_break_its_own_reload`; both fail without the
-seal.
+What the window closes is a capability's *presence*, not its *content*: a plugin that keeps
+its `Arc<dyn Tool>` can still change a registered tool's description and schema, because
+`spec()` is called live and `schema::validate_spec` runs only inside `register_tool`. That
+route is `architecture.md` §11-14.
+
+A registration *simultaneous* with `load` returning is a coin flip — 13 to 64 of 64 racing
+attempts accepted across 25 identical rounds — and the registry and `record.registered`
+agreed in every one, which is the property the `RwLock` buys. The plugin's `PluginHandle`
+does not move with it, so `claim_matches_reality()` and `rivet doctor`'s warning differ run
+to run for identical input. Written down in `plugin.md` §4.1, where an operator chasing an
+intermittent `doctor` line will look.
+
+Covered by `a_registration_from_a_task_outliving_a_failed_load_is_refused`,
+`a_registration_from_a_task_outliving_a_successful_load_is_refused` and
+`a_plugin_that_registers_from_unload_does_not_break_its_own_reload`; all three fail without
+the seal. The middle one is the only test that pins the seal's *placement* — before the
+`match`, so a successful load is sealed too. Move the call into the `Err` arm and the other
+two still pass, because the first seals at the top of that arm and the third is carried by
+the loader's second seal in `unload`.
+
+`GuardedRegistry::seal` is `pub(crate)`. The type is re-exported so an embedder can build
+its own guard, but the window belongs to the lifecycle rather than to the holder: sealing
+before `load` would make every honest registration fail with a message saying the load
+window had closed.
 
 ---
 
@@ -683,6 +715,8 @@ is a public API and hot reload is the Phase 2 feature that would. Covered by
   `UNLOADED`" and "a record may return to `VALIDATED` and be loaded again". Accepting both
   states satisfies both sentences without a spurious transition.
 
-- **No timeout on `Plugin::load` / `unload`.** review-1 noted the failure table is silent on
-  a *hanging* plugin. I left it silent rather than inventing a budget the design did not
-  specify; it is written down as unverified in `docs/plan.md` and in the build summary.
+- **No timeout on `Plugin::load` / `unload`, or on a registration their spawned tasks have
+  in flight.** review-1 noted the failure table is silent on a *hanging* plugin; review-3
+  showed the seal widened where the hang can come from (§8-4). I left it silent rather than
+  inventing a budget the design did not specify; it is written down as unverified in
+  `docs/plan.md`, and `architecture.md` §11-15 names whose decision it is.

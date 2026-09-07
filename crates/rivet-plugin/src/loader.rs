@@ -29,6 +29,19 @@ pub struct PluginRecord {
     pub instance_id: Option<PluginInstanceId>,
     /// `manifest ∩ profile`, computed at `VALIDATED`.
     pub effective: PermissionSet,
+    /// Whether [`validate`](PluginLoader::validate) got as far as computing `effective`
+    /// and `denied`.
+    ///
+    /// It computes them only after the ABI check passes, so on a rejected record both are
+    /// empty — and a reader that cannot tell that emptiness apart from "the profile
+    /// removed everything" blames a profile that never got a say. `rivet plugin show`
+    /// needs exactly that distinction.
+    ///
+    /// Recorded rather than re-derived: the ABI question is decided against the `host_abi`
+    /// this loader was *constructed with*, which [`PluginLoader::new`] takes as a parameter
+    /// precisely so it can differ from [`rivet_core::ABI_VERSION`]. Asking the manifest
+    /// again elsewhere gives a second answer that is only accidentally the same one.
+    pub permissions_computed: bool,
     /// Permissions the manifest asked for that the profile removed entirely. Drives the
     /// "removed by profile" column of `rivet plugin show`.
     pub denied: Vec<Permission>,
@@ -139,6 +152,7 @@ impl PluginLoader {
                 state: PluginState::Discovered,
                 instance_id: None,
                 effective: PermissionSet::empty(),
+                permissions_computed: false,
                 denied: Vec::new(),
                 registered: Vec::new(),
                 claimed: Vec::new(),
@@ -185,6 +199,7 @@ impl PluginLoader {
                 .filter(|wanted| meet_with(wanted, &grant).is_none())
                 .cloned()
                 .collect();
+            record.permissions_computed = true;
             record.state = PluginState::Validated;
         }
 

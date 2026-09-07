@@ -8,7 +8,7 @@ mod support;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use rivet_core::capability::{FsScope, Permission, PermissionSet};
+use rivet_core::capability::{CapabilityVersion, FsScope, Permission, PermissionSet};
 use rivet_core::event::{Event, EventEnvelope, EventSubscriber};
 use rivet_core::plugin::PluginState;
 use support::{
@@ -88,6 +88,12 @@ async fn an_incompatible_abi_is_rejected_before_load_is_called() {
 
     let record = loader.record(&id("test.wrong-abi")).unwrap();
     assert_eq!(record.state, PluginState::Failed);
+    assert!(
+        !record.permissions_computed,
+        "`validate` rejects on the ABI before it computes `effective`/`denied`, and the \
+         record has to say so: an empty set otherwise reads as a profile that removed \
+         everything"
+    );
     let error = record.error.clone().unwrap();
     assert!(error.contains("0.99"), "{error}");
     assert!(error.contains("0.1"), "the host's version too: {error}");
@@ -105,6 +111,30 @@ async fn an_incompatible_abi_is_rejected_before_load_is_called() {
         .unwrap_err();
     assert!(error.to_string().contains("failed"), "{error}");
     assert!(!spy.entered.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn a_record_validated_against_another_host_abi_still_had_its_permissions_computed() {
+    // `PluginLoader::new` takes `host_abi` as a parameter precisely so it can differ from
+    // `rivet_core::ABI_VERSION`, and here it does: the manifest matches this loader's host
+    // and nothing else. So `record.permissions_computed` and
+    // `manifest.is_compatible_with(rivet_core::ABI_VERSION)` disagree -- which is why the
+    // former is the one to read. `rivet plugin show` asked the manifest and would have
+    // called this validated plugin's grants "not evaluated".
+    let toml = manifest_toml("test.other-abi", "\"tool\"", "").replace("\"0.1\"", "\"0.99\"");
+    support::plan("test.other-abi", &["t"], After::Succeed);
+    let (mut loader, _registry, _bus) =
+        support::loader_with_abi(no_grant(), CapabilityVersion::new(0, 99));
+    loader.discover(&[source("other-abi", toml)]).unwrap();
+    loader.validate();
+
+    let record = loader.record(&id("test.other-abi")).unwrap();
+    assert_eq!(record.state, PluginState::Validated);
+    assert!(record.permissions_computed);
+    assert!(
+        !record.manifest.is_compatible_with(rivet_core::ABI_VERSION),
+        "the two answers must actually differ for this test to mean anything"
+    );
 }
 
 // --- DoD 3: a readonly profile strips write permission ---------------------------------
@@ -312,6 +342,70 @@ async fn a_registration_from_a_task_outliving_a_failed_load_is_refused() {
     assert_eq!(record.state, PluginState::Failed);
     assert!(record.registered.is_empty(), "{:?}", record.registered);
     loader.unload_all().await;
+    assert!(registry.tool_names().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_registration_from_a_task_outliving_a_successful_load_is_refused() {
+    // The seal sits *before* the `match` in `load`, so a load that returned `Ok` is sealed
+    // too, and this is the test that pins that placement. Move the seal into the `Err` arm
+    // and the two tests either side of this one still pass: the failed-load case seals
+    // first thing in that arm, and the `unload` case is carried by the loader's second
+    // seal. Only here does the window have to have closed on a *live* instance.
+    //
+    // The damage is quieter than the failed-load case -- the instance exists, so `unload`
+    // would still take the late capability away -- and that is exactly why it needs a test.
+    // What breaks is the accounting this phase is named for: the registry holds a tool that
+    // `record.registered` does not list, so `rivet plugin list` and `rivet doctor` cannot
+    // see it and `claim_matches_reality` reports a plugin that understated itself.
+    let src = tool_source(
+        "late-ok",
+        "test.late-ok",
+        &["early"],
+        After::SucceedAfterArmingALateRegistration,
+    );
+    let spy = support::plan(
+        "test.late-ok",
+        &["early"],
+        After::SucceedAfterArmingALateRegistration,
+    );
+    let (mut loader, registry, _bus) = loader(no_grant());
+    loader.discover(&[src]).unwrap();
+    loader.validate();
+
+    loader
+        .load(&id("test.late-ok"), null_config())
+        .await
+        .expect("the plugin itself succeeded; only its spawned task misbehaves");
+
+    let refusal = support::late_outcome(&spy)
+        .await
+        .expect_err("a load that succeeded closes the window just as a failed one does");
+    assert!(
+        refusal.contains("test.late-ok"),
+        "the error names the plugin: {refusal}"
+    );
+    assert!(
+        refusal.contains("load"),
+        "and says when the window was open: {refusal}"
+    );
+
+    assert_eq!(
+        registry.tool_names().await,
+        ["early"],
+        "the late tool must not reach the registry: nothing downstream would report it"
+    );
+    let record = loader.record(&id("test.late-ok")).unwrap();
+    assert_eq!(record.state, PluginState::Loaded);
+    assert_eq!(record.registered, ["tool:early"]);
+    assert!(
+        record.claim_matches_reality(),
+        "claimed {:?} but registered {:?}",
+        record.claimed,
+        record.registered
+    );
+
+    loader.unload(&id("test.late-ok")).await.unwrap();
     assert!(registry.tool_names().await.is_empty());
 }
 

@@ -7,7 +7,8 @@
 //! The guard also *closes*. Registration is an act of `load`; once the loader has sealed
 //! the guard (after `load` returns, and again before `unload` runs) every `register_*`
 //! fails loudly, naming the plugin. Without that, the rollback on a failed load is a
-//! point-in-time sweep of a handle the plugin still holds — see [`GuardedRegistry::seal`].
+//! point-in-time sweep of a handle the plugin still holds — see `GuardedRegistry::seal`,
+//! which is crate-private: the loader owns the window's lifecycle, not the embedder.
 //!
 //! The guard also *records* what was registered. That observed list — not the plugin's
 //! self-reported [`PluginHandle`](rivet_core::plugin::PluginHandle) — is what
@@ -46,7 +47,7 @@ pub struct GuardedRegistry {
     observed: Mutex<Vec<String>>,
     /// `true` once the loader has closed the registration window.
     ///
-    /// A lock rather than an `AtomicBool` because [`seal`](Self::seal) has to *wait out*
+    /// A lock rather than an `AtomicBool` because `seal` has to *wait out*
     /// the registrations already in flight: every `register_*` holds the read side across
     /// its whole check-delegate-record sequence, so once `seal` has taken the write side
     /// the observed list can no longer grow. With a flag, a registration that had already
@@ -78,6 +79,12 @@ impl GuardedRegistry {
 
     /// Close the registration window: every later `register_*` fails.
     ///
+    /// Crate-private on purpose. `GuardedRegistry` is re-exported so an embedder can build
+    /// its own, but the window belongs to the lifecycle, not to the holder of the guard: a
+    /// seal before `load` would make every honest registration fail with a message saying
+    /// the load window closed — true, and useless. Only [`PluginLoader`](crate::PluginLoader)
+    /// knows when `load` began and ended, so only it can call this.
+    ///
     /// Registration is an act of `Plugin::load` and of nothing else. The guard outlives
     /// that call — [`PluginContext`](rivet_core::plugin::PluginContext) is `Clone` and its
     /// `registry` is an `Arc` — so without this the loader's rollback is a point-in-time
@@ -89,14 +96,14 @@ impl GuardedRegistry {
     /// failure path, and again before `Plugin::unload` runs — where a registration would
     /// otherwise survive the `unregister_all` that precedes it and hold the name against
     /// the next load. Idempotent.
-    pub async fn seal(&self) {
+    pub(crate) async fn seal(&self) {
         *self.sealed.write().await = true;
     }
 
     /// Hold the registration window open for one `register_*`, if the slot is declared.
     ///
     /// The caller keeps the returned guard until it has recorded the registration. That is
-    /// what makes [`seal`](Self::seal) a fence and not a flag.
+    /// what makes `seal` a fence and not a flag.
     async fn open(&self, kind: CapabilityKind) -> rivet_core::Result<RwLockReadGuard<'_, bool>> {
         let window = self.sealed.read().await;
         if *window {

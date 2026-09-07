@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use rivet_core::capability::PermissionSet;
+use rivet_core::capability::{CapabilityVersion, PermissionSet};
 use rivet_core::error::Error;
 use rivet_core::id::PluginId;
 use rivet_core::plugin::{Plugin, PluginContext, PluginHandle, PluginManifest};
@@ -38,6 +38,10 @@ pub enum After {
     /// of "register once the connection is up", which is how a plugin with a backend
     /// naturally wants to be written.
     FailAfterArmingALateRegistration,
+    /// The same arming, but `load` returns `Ok`. The instance stays alive, so the window
+    /// is the only thing standing between the late registration and a capability that no
+    /// `record.registered` mentions.
+    SucceedAfterArmingALateRegistration,
     /// Register a tool from `unload`, after the loader's `unregister_all` has run.
     RegisterFromUnload,
 }
@@ -157,10 +161,21 @@ pub fn id(raw: &str) -> PluginId {
 
 /// A loader over a fresh registry, granting `profile`.
 pub fn loader(profile: PermissionSet) -> (PluginLoader, Registry, BroadcastBus) {
+    loader_with_abi(profile, rivet_core::ABI_VERSION)
+}
+
+/// The same, for a host whose ABI is not the crate constant.
+///
+/// `PluginLoader::new` takes `host_abi` as a parameter precisely so it can differ, which is
+/// the case anything re-deriving the ABI verdict downstream would get wrong.
+pub fn loader_with_abi(
+    profile: PermissionSet,
+    host_abi: CapabilityVersion,
+) -> (PluginLoader, Registry, BroadcastBus) {
     let bus = BroadcastBus::new();
     let registry = Registry::new(bus.clone());
     let events = registry.events();
-    let loader = PluginLoader::new(registry.clone(), events, rivet_core::ABI_VERSION, profile);
+    let loader = PluginLoader::new(registry.clone(), events, host_abi, profile);
     (loader, registry, bus)
 }
 
@@ -232,6 +247,25 @@ impl Policy for NamedPolicy {
     }
 }
 
+/// Hand a task the registry and let it register 25 ms after `load` has returned.
+///
+/// This is the shape of "register once the connection is up", which is how a plugin with a
+/// backend naturally wants to be written. It deliberately does *not* select on
+/// `ctx.shutdown`: a plugin that ignores its token is exactly the one the host cannot
+/// afford to trust.
+fn arm_late_registration(ctx: &PluginContext, spy: &Arc<Spy>) {
+    let registry = ctx.registry.clone();
+    let spy = spy.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        spy.record_late(
+            registry
+                .register_tool(Arc::new(NamedTool("late_tool".to_string())))
+                .await,
+        );
+    });
+}
+
 #[derive(Debug)]
 struct ScriptedPlugin {
     manifest: PluginManifest,
@@ -273,21 +307,14 @@ impl Plugin for ScriptedPlugin {
                 Ok(PluginHandle::new(registered))
             }
             After::FailAfterArmingALateRegistration => {
-                // Deliberately does *not* select on `ctx.shutdown`: a plugin that ignores
-                // its token is exactly the one the host cannot afford to trust.
-                let registry = ctx.registry.clone();
-                let spy = self.spy.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                    spy.record_late(
-                        registry
-                            .register_tool(Arc::new(NamedTool("late_tool".to_string())))
-                            .await,
-                    );
-                });
+                arm_late_registration(&ctx, &self.spy);
                 Err(Error::plugin(
                     "this plugin fails after arming a late registration",
                 ))
+            }
+            After::SucceedAfterArmingALateRegistration => {
+                arm_late_registration(&ctx, &self.spy);
+                Ok(PluginHandle::new(registered))
             }
         }
     }

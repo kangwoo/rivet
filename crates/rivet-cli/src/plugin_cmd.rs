@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use rivet_core::capability::{FsScope, Permission};
 use rivet_core::error::Error;
 use rivet_core::id::PluginId;
-use rivet_core::plugin::PluginState;
 use rivet_plugin::PluginRecord;
 use rivet_plugin::loader::state_label;
 
@@ -188,7 +187,11 @@ fn capabilities(record: &PluginRecord) -> String {
 
 /// What the profile did to one requested permission.
 fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
-    if !permissions_were_computed(record) {
+    // Read from the record rather than re-asking the manifest. `validate` decided the ABI
+    // question against the `host_abi` its loader was constructed with; asking
+    // `is_compatible_with(rivet_core::ABI_VERSION)` here answers a *different* question
+    // that happens to agree today because both CLI entry points pass that constant.
+    if !record.permissions_computed {
         return "not evaluated (this plugin never passed validation)".to_string();
     }
     if record.denied.contains(wanted) {
@@ -199,17 +202,6 @@ fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
         // Met, but not to what was asked for: the profile capped a wider request.
         format!("narrowed by profile `{profile}`")
     }
-}
-
-/// Whether `validate` got as far as computing `effective` and `denied` for this record.
-///
-/// It computes them only after the ABI check passes, so on a rejected record both are
-/// empty — and [`effect`]'s fall-through would read that emptiness as "the profile capped
-/// a wider request", naming a profile that never got a say. The ABI is the only thing
-/// `validate` rejects, and a record it has not reached yet is still `DISCOVERED`.
-fn permissions_were_computed(record: &PluginRecord) -> bool {
-    record.state != PluginState::Discovered
-        && record.manifest.is_compatible_with(rivet_core::ABI_VERSION)
 }
 
 /// A permission as a manifest would spell it, with its scope.
@@ -270,7 +262,7 @@ fn io(path: &Path, error: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use rivet_core::capability::{CapabilityVersion, PermissionSet};
-    use rivet_core::plugin::PluginManifest;
+    use rivet_core::plugin::{PluginManifest, PluginState};
     use rivet_plugin::Origin;
 
     use super::*;
@@ -297,6 +289,7 @@ mod tests {
             state: PluginState::Validated,
             instance_id: None,
             effective: PermissionSet::new(wanted),
+            permissions_computed: true,
             denied: Vec::new(),
             registered: Vec::new(),
             claimed: Vec::new(),
@@ -314,7 +307,7 @@ mod tests {
         record.manifest.abi_version = CapabilityVersion::new(0, 99);
         record.state = PluginState::Failed;
         record.effective = PermissionSet::empty();
-        assert!(!record.manifest.is_compatible_with(rivet_core::ABI_VERSION));
+        record.permissions_computed = false;
 
         let said = effect(
             &record,
@@ -323,6 +316,29 @@ mod tests {
         );
         assert!(!said.contains("developer"), "{said}");
         assert!(said.contains("not evaluated"), "{said}");
+    }
+
+    #[test]
+    fn a_host_abi_the_cli_does_not_share_does_not_make_a_grant_disappear() {
+        // The record is the source of truth, not the manifest. `validate` answers the ABI
+        // question against the `host_abi` its loader was built with, and `PluginLoader::new`
+        // takes that as a parameter so an embedder can pass something other than
+        // `rivet_core::ABI_VERSION`. Re-deriving here would call this record unevaluated and
+        // print "not evaluated" for a permission the profile really did grant -- the exact
+        // bug `permissions_computed` was added to stop.
+        let mut record = record_asking_for(vec![Permission::FsRead(FsScope::Workspace)]);
+        record.manifest.abi_version = CapabilityVersion::new(0, 99);
+        assert!(
+            !record.manifest.is_compatible_with(rivet_core::ABI_VERSION),
+            "the manifest and the CLI's constant must disagree for this test to mean anything"
+        );
+
+        let said = effect(
+            &record,
+            &Permission::FsRead(FsScope::Workspace),
+            "developer",
+        );
+        assert_eq!(said, "granted");
     }
 
     #[test]
