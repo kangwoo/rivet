@@ -153,9 +153,10 @@ fn permission_from_raw(
 
 /// A topic-prefix allowlist.
 ///
-/// Rejects an empty prefix as well as an empty list: `""` matches every topic, so a grant
-/// spelling it would read as narrow and behave as `None`. That is the same trap
-/// `FsScope::subtree` rejects for `..`.
+/// Only the *empty list* is refused here, and only because [`host_list`] would otherwise
+/// beat this function to it with a message about hosts. An empty prefix is refused one
+/// level down, by `TopicScope::new`, which gives the topic reason too — repeating the
+/// check here would be a second place to keep in step for no second answer.
 fn topic_list(
     name: &str,
     value: &toml::Value,
@@ -175,18 +176,7 @@ fn topic_list(
             ),
         ));
     }
-    let topics = host_list(name, value, origin)?;
-    if topics.iter().any(String::is_empty) {
-        return Err(bad(
-            origin,
-            format!(
-                "permission `{name}` has an empty topic prefix in its `scope`; \
-                 an empty prefix matches every topic, so it grants what leaving \
-                 `scope` out grants"
-            ),
-        ));
-    }
-    Ok(topics)
+    host_list(name, value, origin)
 }
 
 fn fs_scope(
@@ -443,14 +433,19 @@ permission = "job_manage"
     #[test]
     fn an_empty_topic_prefix_is_refused() {
         // `""` matches every topic, so a manifest spelling it would look narrow and behave
-        // like leaving `scope` out entirely.
+        // like leaving `scope` out entirely. Refused by `TopicScope::new`, one level below
+        // the parser, and the message still has to reach the manifest author naming the
+        // permission it came from.
         let err = with(
             "[[permissions]]\n\
              permission = \"events_subscribe\"\n\
              scope = [\"tool.\", \"\"]\n",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("empty topic prefix"), "{err}");
+        let text = err.to_string();
+        assert!(text.contains("events_subscribe"), "{err}");
+        assert!(text.contains("empty prefix"), "{err}");
+        assert!(text.contains("matches every topic"), "{err}");
     }
 
     #[test]
