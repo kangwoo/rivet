@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rivet_core::agent::RunLimits;
-use rivet_core::capability::{FsScope, Permission, PermissionSet};
+use rivet_core::capability::{FsScope, Permission, PermissionSet, TopicScope};
 use rivet_core::error::Error;
 use rivet_core::id::PluginId;
 use rivet_core::model::ModelId;
@@ -258,22 +258,24 @@ impl Profile {
     /// prefixes and prefixes cannot express "not". That is worth the verbosity: a topic
     /// added under `agent.` later — a prompt echo, say — is **not** granted until somebody
     /// adds it here, so the list fails closed rather than widening on its own.
-    fn subscribable_topics(self) -> Option<Vec<String>> {
+    fn subscribable_topics(self) -> Option<TopicScope> {
         match self {
             Self::Developer | Self::Ci => None,
             Self::ReadOnly | Self::Reviewer | Self::Production => Some(
-                [
-                    "agent.request.",
-                    "agent.run.",
-                    "agent.turn.",
-                    "job.",
-                    "plugin.",
-                    "runtime.",
-                    "tool.",
-                ]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+                TopicScope::new(
+                    [
+                        "agent.request.",
+                        "agent.run.",
+                        "agent.turn.",
+                        "job.",
+                        "plugin.",
+                        "runtime.",
+                        "tool.",
+                    ]
+                    .iter()
+                    .map(|s| (*s).to_string()),
+                )
+                .expect("the profile's own topic list is a valid scope"),
             ),
         }
     }
@@ -563,7 +565,7 @@ mod tests {
     /// decision about whether the narrowed profiles should receive it.
     #[test]
     fn every_agent_topic_is_granted_or_deliberately_withheld() {
-        use rivet_core::capability::Permission;
+        use rivet_core::capability::{Permission, TopicScope};
         use rivet_core::event::AgentEvent;
 
         // `false` means "withheld on purpose". Adding a variant means answering this.
@@ -583,7 +585,9 @@ mod tests {
 
         let granted = super::Profile::ReadOnly.permissions();
         for event in rivet_core::event::AgentEvent::one_of_each() {
-            let wanted = Permission::EventsSubscribe(Some(vec![event.topic().to_string()]));
+            let wanted = Permission::EventsSubscribe(Some(
+                TopicScope::new([event.topic().to_string()]).expect("a real topic"),
+            ));
             assert_eq!(
                 granted.allows(&wanted),
                 should_reach_a_narrowed_profile(&event),
@@ -596,9 +600,13 @@ mod tests {
     /// The decision recorded in `architecture.md` §11-10: who may subscribe, and to what.
     #[test]
     fn only_the_writable_profiles_may_subscribe_to_the_model_output() {
-        use rivet_core::capability::Permission;
-        let text = Permission::EventsSubscribe(Some(vec!["agent.text.".into()]));
-        let lifecycle = Permission::EventsSubscribe(Some(vec!["tool.execute.".into()]));
+        use rivet_core::capability::{Permission, TopicScope};
+        let text = Permission::EventsSubscribe(Some(
+            TopicScope::new(["agent.text.".to_string()]).unwrap(),
+        ));
+        let lifecycle = Permission::EventsSubscribe(Some(
+            TopicScope::new(["tool.execute.".to_string()]).unwrap(),
+        ));
 
         for profile in [super::Profile::Developer, super::Profile::Ci] {
             let granted = profile.permissions();

@@ -716,6 +716,13 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    `EventSubscriber::topics()`는 **구독자 자신의 선호**라 기본값이 "전부"다. 즉 scope가
    없으면 이 권한은 all-or-nothing이었고, `agent.text.delta`는 모델 출력 전문을 나른다.
 
+   scope 목록은 집합이므로 `TopicScope`·`StringSet` 두 newtype이 **생성 시점에** 정규형을
+   만든다 (정렬·중복 제거, 토픽은 덮인 접두사 흡수). `Deserialize`도 같은 생성자를 지나므로
+   비정규형은 존재할 수 없다. 이 결정은 사후에 내렸다 — 처음엔 `Vec<String>`을 그대로 두고
+   비교하는 쪽에서 정규화했는데, **세 커밋에서 세 번 그걸 잊었다**: `allows`, `plugin show`의
+   granted 분기, 그리고 그 수정이 깨뜨린 denied 분기. 부를 자리를 없애는 것이 답이었다.
+   근거: PR #2 리뷰 1·2라운드.
+
    호스트 allowlist의 meet을 그대로 쓸 수 없다는 점이 이 결정의 실질이다. 호스트는 정확
    일치지만 토픽은 접두사이므로, 두 접두사가 공통 토픽을 가지려면 **한쪽이 다른 쪽의
    접두사여야 하고 그때 긴 쪽이 답이다** — `tool.` ⊓ `tool.execute.` = `tool.execute.`,

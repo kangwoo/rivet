@@ -122,8 +122,14 @@ scope      = ["tool.", "agent.run."]   # 생략 = 모든 토픽
 호스트 allowlist와 달리 두 scope의 meet은 문자열 교집합이 **아니다.** 접두사 둘이 공통
 토픽을 가지려면 한쪽이 다른 쪽의 접두사여야 하고, 그때 **긴 쪽**이 답이다 — 프로파일이
 `tool.`을 주고 매니페스트가 `tool.execute.`를 요청하면 결과는 `tool.execute.`이지
-`tool.`이 아니다. `tool.`과 `run.`은 공통 토픽이 없으므로 권한이 0개가 된다. 빈 문자열은
-모든 토픽에 걸리므로 — 좁아 보이면서 전체를 주므로 — 파서가 거부한다.
+`tool.`이 아니다. `tool.`과 `run.`은 공통 토픽이 없으므로 권한이 0개가 된다.
+
+scope 목록은 **집합**이다. `TopicScope`(토픽)와 `StringSet`(호스트·시크릿 키)이 생성
+시점에 정렬·중복 제거하고, 토픽은 다른 항목이 이미 덮는 접두사까지 흡수한다. 그래서
+`["tool.", "tool.execute."]`와 `["tool."]`은 **같은 값**이고, 적은 순서가 판정을 바꾸지
+않는다. 빈 목록과 빈 접두사는 생성자가 거부한다 — 빈 접두사는 모든 토픽에 걸려서 좁아
+보이면서 전체를 주고, 빈 목록은 meet에는 "겹침 없음"이고 `topic_matches`에는 "전부"라
+양끝이 반대로 읽힌다. `Deserialize`도 같은 생성자를 지난다.
 
 `readonly` · `reviewer` · `production`은 `agent.text`를 주지 않는다
 ([`security.md` §8](./security.md)). `events_subscribe(["agent.text."])`를 선언한 plugin은
