@@ -69,6 +69,18 @@ pub enum Event {
 }
 
 impl Event {
+    /// The topic this event publishes on.
+    ///
+    /// **Adding a variant here adds a topic *family*, and the narrowed profiles will not
+    /// receive it.** `Profile::subscribable_topics` in `rivet-cli` enumerates seven
+    /// prefixes — `agent.request.`, `agent.run.`, `agent.turn.`, `job.`, `plugin.`,
+    /// `runtime.`, `tool.` — because prefixes cannot express "everything but
+    /// `agent.text`". A sixth family falls outside all seven and is denied to `readonly`,
+    /// `reviewer` and `production` with nothing failing.
+    ///
+    /// That is the safe direction, and it is silent. `AgentEvent::topic` has a compile-time
+    /// tripwire for a new *variant* within its family; there is none for a new family,
+    /// because a family has no exclusion to enumerate against. This note is the tripwire.
     #[must_use]
     pub fn topic(&self) -> &'static str {
         match self {
@@ -128,6 +140,10 @@ impl AgentEvent {
     /// granted to `readonly`, `reviewer` or `production` until somebody adds it to
     /// `Profile::subscribable_topics` in `rivet-cli`.** That is the safe direction and the
     /// silent one, which is why the warning is at the line you would be editing.
+    ///
+    /// `rivet-cli`'s `every_agent_topic_is_granted_or_deliberately_withheld` makes adding a
+    /// variant here a compile error at the list that decides it. Adding a whole *family* to
+    /// [`Event`] has no such tripwire — see the note there.
     #[must_use]
     pub fn topic(&self) -> &'static str {
         match self {

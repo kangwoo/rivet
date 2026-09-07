@@ -209,7 +209,10 @@ fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
     }
 }
 
-/// A permission as a manifest would spell it, with its scope.
+/// A permission with its scope, in the canonical form.
+///
+/// Not the manifest's own spelling: `scope = ["tool.", "tool.execute."]` prints
+/// `events_subscribe(tool.)`, because that is the set it asked for and the set it got.
 fn describe(permission: &Permission) -> String {
     match permission {
         Permission::FsRead(scope) => format!("fs_read({})", fs_scope(scope)),

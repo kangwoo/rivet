@@ -123,9 +123,14 @@ impl StringSet {
         &self.0
     }
 
-    /// Already sorted and deduplicated, and known non-empty.
+    /// The meet's result, through the same door as everything else.
+    ///
+    /// The caller happens to hand this a sorted, deduplicated list of non-empty members,
+    /// so a cheaper constructor that trusted it would be correct today. It would also be
+    /// the exact trust this type exists to remove, one level down — so it re-sorts a
+    /// sorted vector inside a function only a meet reaches, and buys the invariant.
     fn from_canonical(items: Vec<String>) -> Option<Self> {
-        (!items.is_empty()).then_some(Self(items))
+        Self::new(items).ok()
     }
 }
 
@@ -178,8 +183,12 @@ impl TopicScope {
 
     /// Drop every entry a kept entry is already a prefix of.
     ///
-    /// Sorted order puts a prefix immediately before everything it covers, so comparing
-    /// against the last kept entry is enough.
+    /// Comparing against the last *kept* entry is enough, and the reason is not that a
+    /// prefix sits immediately before what it covers — for `["a", "ab", "ac"]` it does not.
+    /// It is that everything ordered between a prefix and something it covers is *also*
+    /// covered by it, so once `p` is kept, every later entry `p` covers is contiguous with
+    /// it through the ones already dropped. Comparing against the previous *input* entry
+    /// instead would keep `["a", "ac"]` — not an antichain.
     fn absorb(sorted: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::with_capacity(sorted.len());
         for prefix in sorted {
@@ -193,11 +202,10 @@ impl TopicScope {
         out
     }
 
-    fn from_unsorted(mut items: Vec<String>) -> Option<Self> {
-        items.sort();
-        items.dedup();
-        let absorbed = Self::absorb(&items);
-        (!absorbed.is_empty()).then_some(Self(absorbed))
+    /// The meet's result, through the same door as everything else. See
+    /// [`StringSet::from_canonical`] for why this validates rather than trusting.
+    fn from_unsorted(items: Vec<String>) -> Option<Self> {
+        Self::new(items).ok()
     }
 }
 
@@ -494,6 +502,21 @@ mod tests {
         ] {
             assert_eq!(TopicScope::new(spelling).unwrap(), wide);
         }
+
+        // Absorption is for prefixes and **only** for prefixes. Hosts and secret keys are
+        // exact strings: `a.example` does not cover `a.example.net`, and dropping it would
+        // silently narrow what the manifest asked for. The two newtypes are structurally
+        // near-identical and twenty lines apart, so "share the implementation" is the most
+        // likely wrong edit; this is what refuses it.
+        let hosts = strings(&["a.example", "a.example.net"]);
+        assert_eq!(hosts.as_slice(), ["a.example", "a.example.net"]);
+        let keys = strings(&["A_TOKEN", "A_TOKEN_2"]);
+        assert_eq!(keys.as_slice(), ["A_TOKEN", "A_TOKEN_2"]);
+        // The same input as a topic scope does absorb.
+        assert_eq!(
+            topics(&["a.example", "a.example.net"]).as_slice(),
+            ["a.example"]
+        );
 
         // And so the comparison that needed normalising three times does not.
         let held = PermissionSet::new(vec![Permission::EventsSubscribe(Some(

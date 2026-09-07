@@ -297,7 +297,7 @@ profile:  FsWrite(Workspace)
 ```rust
 pub enum Permission {
     FsRead(FsScope), FsWrite(FsScope), ProcessSpawn,
-    NetworkHttp(Option<Vec<String>>),
+    NetworkHttp(Option<StringSet>),
     SessionRead, SessionWrite,
     EventsSubscribe(Option<TopicScope>), EventsPublish,
     SecretsRead(StringSet), JobManage,
