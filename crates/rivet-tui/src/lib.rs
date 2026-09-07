@@ -29,6 +29,13 @@ pub mod draw;
 pub mod state;
 pub mod terminal;
 
+/// The name this crate's subscriber registers under, and the one a lag report will show.
+///
+/// At the crate root because two modules need to agree on it: [`app::Tui`] returns it from
+/// `EventSubscriber::name`, and [`state::AppState`] compares a `runtime.subscriber_lagged`
+/// report against it to tell what *this* screen missed from what somebody else did.
+pub const SUBSCRIBER_NAME: &str = "render.tui";
+
 pub use app::{Intent, Tui};
 pub use draw::{NO_JOBS, draw, status_line};
 pub use state::{AppState, JobLine, JobView, Panel, RunView, StatusView, ToolLine, ToolStatus};

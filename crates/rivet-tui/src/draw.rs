@@ -195,6 +195,12 @@ pub fn status_line(state: &AppState, width: u16) -> String {
         // is a floor rather than a total. `docs/events.md` §5 says the same thing.
         segments.push((3, format!("≥{} dropped", state.status.dropped)));
     }
+    if state.status.dropped_elsewhere > 0 {
+        // Somebody else's losses, said in the third person and ranked to go first when the
+        // bar has to shed segments. Summed into the one above, it read as "this screen
+        // missed 42 events" when the screen had received every one of them.
+        segments.push((9, format!("{} elsewhere", state.status.dropped_elsewhere)));
+    }
     if state.status.shutting_down {
         segments.push((3, "shutting down".to_string()));
     }

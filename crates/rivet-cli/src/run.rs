@@ -298,9 +298,6 @@ async fn drive(
     let summary = agent_loop.run(cfg, state, input).await;
 
     signals.abort();
-    if let Some(screen) = screen.take() {
-        screen.stop().await;
-    }
     host.shutdown();
     // `runtime.shutting_down` before the unloads it explains, so a plugin's own subscriber
     // sees the reason it is about to be detached. The `plugin.unloaded` lines that follow
@@ -316,7 +313,26 @@ async fn drive(
     // the summary is the last thing on the screen rather than a line the stream runs over.
     watching.finish().await;
 
+    // The screen comes down *after* the drain, not before it. Everything above this line
+    // publishes -- `runtime.shutting_down` most of all -- and a screen stopped first folds
+    // all of that into a state nobody ever draws, which is how the status bar's "shutting
+    // down" segment came to be rendered, asserted on, and never once seen. `render_loop`
+    // draws one final frame on its way out, so by here the ending has actually been shown.
+    if let Some(screen) = &mut screen {
+        screen.stop().await;
+    }
+
     let summary = summary?;
+    // The terminal is back, and with it the answer. `--tui` attaches the screen as the run's
+    // *only* subscriber -- `render::attach` returns one observer, and for `Tui` that is it,
+    // so no `HumanRenderer` is streaming underneath -- and every delta the model produced
+    // lives on the alternate screen that has just been discarded. Without this the reply
+    // flashes away at the moment it completes and `rivet session show` is the only way back
+    // to it. `Human` streamed it as it arrived and `Jsonl` carries it as events; this is the
+    // one mode with nowhere else to put it.
+    if let Some(tui) = &watching.tui {
+        answer(&tui.snapshot().run);
+    }
     // Not `Jsonl`: that stream is for a machine and a prose footer would be a parse error.
     // `Tui` prints it like `Human` does -- the terminal has been restored by now, so it
     // lands on the real screen, which is what the alternate screen going away is for.
@@ -326,14 +342,42 @@ async fn drive(
     Ok(summary)
 }
 
+/// Print what the TUI was showing, once the alternate screen is gone.
+///
+/// To stdout, where `HumanRenderer` streams the same text: the answer is the output, and
+/// `--tui` refuses a pipe, so this is a terminal either way.
+///
+/// The panel keeps a bounded buffer, so a long enough run has already lost its opening.
+/// Saying so beats printing a reply that silently begins in the middle -- and it is the
+/// same sentence, and the same count, the panel itself was showing.
+fn answer(run: &rivet_tui::RunView) {
+    if run.text.is_empty() {
+        return;
+    }
+    if run.text_dropped > 0 {
+        eprintln!(
+            "  · the first {} character(s) scrolled out of the panel; \
+             `rivet session show` has the whole reply",
+            run.text_dropped
+        );
+    }
+    println!("{}", run.text);
+}
+
 /// The TUI while it is on screen: raw mode, the render loop, and the intent pump.
 ///
 /// A value rather than three locals so `drive` has one thing to stop, and so the terminal
-/// is put back on every path out — including the error one.
+/// is put back on every path out — including the error one. That second half is what
+/// [`Screen::drop`] is for: it was asserted in this comment and implemented nowhere, and
+/// held only because no `?` happens to sit between [`Screen::start`] and [`Screen::stop`]
+/// today.
+///
+/// The handles are `Option` so both ways out can take them — [`Screen::stop`] needs to
+/// `await` one, which it could not do out of a type that also implements `Drop`.
 #[derive(Debug)]
 struct Screen {
-    render: tokio::task::JoinHandle<()>,
-    intents: tokio::task::JoinHandle<()>,
+    render: Option<tokio::task::JoinHandle<()>>,
+    intents: Option<tokio::task::JoinHandle<()>>,
     /// Ends the render loop. A child of nothing: cancelling the *run* should not
     /// immediately blank the screen, because the run still has its shutdown to do.
     stop: CancellationToken,
@@ -392,20 +436,49 @@ impl Screen {
         });
 
         Ok(Self {
-            render,
-            intents,
+            render: Some(render),
+            intents: Some(intents),
             stop,
         })
     }
 
     /// Put the terminal back, then let the tasks go.
+    ///
+    /// The render task is *awaited* rather than aborted, and the reason is ordering rather
+    /// than safety: whatever comes next -- the answer, the summary -- is printed on the real
+    /// screen, so `guard.restore()` has to have happened before this returns. Aborting would
+    /// restore it too, at some later moment of the runtime's choosing, and the summary would
+    /// race the alternate screen going away.
     #[allow(clippy::future_not_send)] // Runs on the same task that built it.
-    async fn stop(self) {
+    async fn stop(&mut self) {
         self.stop.cancel();
-        // Awaited rather than aborted: the render task restores the terminal on its way
-        // out, and aborting it would leave the shell in raw mode.
-        let _ = self.render.await;
-        self.intents.abort();
+        if let Some(render) = self.render.take() {
+            let _ = render.await;
+        }
+        if let Some(intents) = self.intents.take() {
+            intents.abort();
+        }
+    }
+}
+
+impl Drop for Screen {
+    /// The path [`Screen::stop`] never reached.
+    ///
+    /// A `?` between [`Screen::start`] and the stop, or a panic unwinding through [`drive`].
+    /// After a normal `stop` both handles are `None` and this does nothing.
+    ///
+    /// Aborting is what restores the terminal here: `TerminalGuard` is owned by the render
+    /// task, and dropping that task's future drops the guard, whose own `Drop` leaves raw
+    /// mode and the alternate screen. There is no `await` in a destructor to order it
+    /// against anything, which is exactly why `stop` exists as well as this.
+    fn drop(&mut self) {
+        self.stop.cancel();
+        if let Some(render) = self.render.take() {
+            render.abort();
+        }
+        if let Some(intents) = self.intents.take() {
+            intents.abort();
+        }
     }
 }
 

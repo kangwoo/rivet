@@ -545,6 +545,46 @@ async fn jsonl_carries_a_failed_plugin_load_and_not_just_the_exit_code() {
 }
 
 #[tokio::test]
+async fn plugin_list_does_not_tell_you_to_enable_what_you_already_enabled() {
+    // The footer names what is off and what to do about it. It compared against
+    // `catalog::default_selection()` rather than the resolved `enabled` set -- and those two
+    // differ exactly when somebody has written a config -- so an operator who had put the
+    // telemetry plugin in `[plugins].enabled` got a row reading `ENABLED yes` and, under it,
+    // an instruction to go and put it in `[plugins].enabled`.
+    let provider = Provider::start(vec![]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    workspace.enable_plugins(&[
+        "rivet.model-openai",
+        "rivet.tool-filesystem",
+        "rivet.telemetry-log",
+    ]);
+
+    let (code, stdout, stderr) = workspace.run(&["plugin", "list"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let footer = stdout
+        .lines()
+        .find(|line| line.contains("[plugins].enabled"))
+        .unwrap_or("");
+    assert!(
+        !footer.contains("rivet.telemetry-log"),
+        "it is enabled in this config: {stdout}"
+    );
+
+    // And the other direction, so this is not passing by never printing a footer at all: the
+    // default selection leaves the telemetry plugin out, so an unconfigured tree is told.
+    let bare = Workspace::new(&provider.base_url);
+    let (code, stdout, stderr) = bare.run(&["plugin", "list"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains("[plugins].enabled") && line.contains("rivet.telemetry-log")),
+        "a plugin nothing enabled has to say how to turn it on: {stdout}"
+    );
+}
+
+#[tokio::test]
 async fn tui_refuses_a_pipe() {
     // Raw mode on a pipe leaves no terminal to put back, and the symptom shows up later as
     // a shell that stopped echoing. So it is refused before raw mode, as exit code 2.

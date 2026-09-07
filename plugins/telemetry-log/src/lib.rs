@@ -160,13 +160,41 @@ impl Settings {
         // `include_conversation = false` does not merely drop the records: the prefix is
         // never subscribed to. Counting the deltas would mean receiving them, and
         // receiving them means they exist somewhere.
-        if settings.include_conversation {
-            if !settings.topics.iter().any(|t| t == CONVERSATION_TOPIC) {
-                settings.topics.push(CONVERSATION_TOPIC.to_string());
-            }
-            if !settings.promised.iter().any(|t| t == CONVERSATION_TOPIC) {
-                settings.promised.push(CONVERSATION_TOPIC.to_string());
-            }
+        //
+        // Which is a promise about the *subscription*, so it has to be checked against the
+        // written list and not just the default one. `topics = ["agent."]` reaches
+        // `agent.text.` -- covering it is subscribing to it -- and a switch that only holds
+        // when the operator wrote no list is not the gate this module doc describes. Asking
+        // rather than silently trimming: an operator who wrote `agent.` and meant it should
+        // say so, and one who did not has a typo worth seeing.
+        //
+        // Overlap in *either* direction, which is the one place in this file where coverage
+        // is the wrong relation. `agent.` covers the conversation and delivers it;
+        // `agent.text.delta` is covered *by* it and delivers it too. The question is not
+        // "does the grant carry this whole" but "does this subscription carry any of the
+        // model's output", and both answers are yes.
+        if !settings.include_conversation
+            && let Some(reaching) = settings.topics.iter().find(|t| {
+                CONVERSATION_TOPIC.starts_with(t.as_str()) || t.starts_with(CONVERSATION_TOPIC)
+            })
+        {
+            let named = if reaching == CONVERSATION_TOPIC {
+                format!("`topics` contains `{CONVERSATION_TOPIC}`")
+            } else {
+                format!("`topics` contains `{reaching}`, which reaches `{CONVERSATION_TOPIC}`")
+            };
+            return Err(Error::invalid_argument(format!(
+                "{named} — the model's own output — while `include_conversation` is off. \
+                 Subscribing to it is what puts it in the log, so the two cannot both be \
+                 true: narrow the prefix, or set `include_conversation = true` to say you \
+                 meant it."
+            )));
+        }
+        if settings.include_conversation
+            && !rivet_core::capability::covers_whole(&settings.topics, CONVERSATION_TOPIC)
+        {
+            settings.topics.push(CONVERSATION_TOPIC.to_string());
+            settings.promised.push(CONVERSATION_TOPIC.to_string());
         }
 
         Ok(settings)
@@ -187,17 +215,14 @@ impl Settings {
 
     /// Which of `self.topics` the grant does not carry **whole**, promised or not.
     ///
-    /// "Whole" is the load-bearing word, and it is not the same as "overlaps at all". A
-    /// prefix `p` survives the meet intact only if the grant holds a prefix `p` itself
-    /// starts with — anything *narrower* than `p` keeps a slice of it and drops the rest.
-    ///
-    /// The case that makes the difference concrete: `topics = ["agent."]` against a
-    /// narrowed profile, whose grant is `agent.request.`, `agent.run.`, `agent.turn.` and
-    /// four others. `meet_prefixes` unions, so the meet is those three — non-empty, so the
-    /// host's guard passes it, and `agent.text.` is gone without a word. An overlap test
-    /// calls that survival, because `agent.request.` does start with `agent.`; the module
-    /// doc's promise ("`load` fails and names what went missing") would then be false for
-    /// the one input it was written for.
+    /// "Whole" is the load-bearing word, and it is not "overlaps at all" — see
+    /// [`TopicScope::covers_whole`], which is where that rule lives and which the host's
+    /// own narrowing trace calls too. The case that makes the difference concrete is
+    /// `topics = ["agent."]` against a narrowed profile: the meet keeps `agent.request.`,
+    /// `agent.run.` and `agent.turn.` and drops `agent.text.`, so it is non-empty, the
+    /// host's guard passes it, and only this check stands between that and a module doc
+    /// whose promise ("`load` fails and names what went missing") is false for the one
+    /// input it was written for.
     #[must_use]
     pub fn narrowed_by(&self, grant: &[Permission]) -> Vec<String> {
         let granted = match subscribable(grant) {
@@ -209,12 +234,7 @@ impl Settings {
         };
         self.topics
             .iter()
-            .filter(|wanted| {
-                !granted
-                    .as_slice()
-                    .iter()
-                    .any(|held| wanted.starts_with(held.as_str()))
-            })
+            .filter(|wanted| !granted.covers_whole(wanted))
             .cloned()
             .collect()
     }
@@ -225,26 +245,32 @@ impl Settings {
 /// Three cases, and collapsing any two of them loses something: "not granted at all" is
 /// the host guard's error, "granted without a scope" narrows nothing, and only the third
 /// can remove a prefix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Subscribable<'a> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Subscribable {
     /// No `events_subscribe` in the grant.
     Nothing,
     /// Granted, unscoped: every topic.
     Everything,
     /// Granted, scoped to these prefixes.
-    Scoped(&'a TopicScope),
+    Scoped(TopicScope),
 }
 
-fn subscribable(grant: &[Permission]) -> Subscribable<'_> {
-    for permission in grant {
-        if let Permission::EventsSubscribe(scope) = permission {
-            return match scope {
-                None => Subscribable::Everything,
-                Some(topics) => Subscribable::Scoped(topics),
-            };
-        }
+/// What the grant, taken **whole**, allows subscribing to.
+///
+/// Through [`Permission::join_events_subscribe`] rather than the first match: a grant can
+/// carry two `EventsSubscribe` entries, because `PermissionSet` dedups only equal values
+/// and the meet pushes a result per meeting pair. Stopping at the first made this answer
+/// depend on sort order, which under `[EventsSubscribe(["agent."]), EventsSubscribe(["tool."])]`
+/// meant reporting `tool.` as removed by a grant that carries it.
+fn subscribable(grant: &[Permission]) -> Subscribable {
+    match Permission::join_events_subscribe(grant) {
+        Some(Permission::EventsSubscribe(None)) => Subscribable::Everything,
+        Some(Permission::EventsSubscribe(Some(topics))) => Subscribable::Scoped(topics),
+        // `None` is "no `events_subscribe` in the grant". The other half of this arm is
+        // unreachable -- `join_events_subscribe` returns an `EventsSubscribe` or nothing --
+        // and folding it in here is what keeps that from needing a wildcard of its own.
+        None | Some(_) => Subscribable::Nothing,
     }
-    Subscribable::Nothing
 }
 
 #[async_trait]
@@ -424,7 +450,14 @@ mod tests {
             )
             .unwrap(),
         ))];
-        let settings = Settings::from_config(&serde_json::json!({"topics": ["agent."]})).unwrap();
+        // Built directly rather than through `from_config`: a written `agent.` reaches the
+        // conversation, and the gate below refuses it without `include_conversation`. What
+        // is under test here is the coverage rule, not the gate.
+        let settings = Settings {
+            topics: vec!["agent.".to_string()],
+            promised: vec!["agent.".to_string()],
+            ..Settings::default()
+        };
         assert_eq!(settings.narrowed_by(&grant), ["agent."]);
         assert_eq!(
             settings.broken_promises(&grant),
@@ -451,6 +484,70 @@ mod tests {
             Settings::default()
                 .narrowed_by(&[Permission::EventsSubscribe(None)])
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_written_prefix_that_reaches_the_conversation_needs_include_conversation() {
+        // The hole the switch had: `include_conversation` guarded only the *default* list,
+        // so a written `topics` naming the prefix -- or any prefix covering it -- subscribed
+        // to the model's output with the switch still reading `false`. Under `developer`,
+        // whose grant is unscoped, that loaded and logged the length of every delta.
+        for reaching in ["agent.text.", "agent.", "agent.text.delta"] {
+            let error = Settings::from_config(&serde_json::json!({"topics": [reaching]}))
+                .expect_err(reaching);
+            // `agent.` covers the prefix, `agent.text.` is it, `agent.text.delta` sits
+            // inside it -- three shapes, one subscription to the model's output.
+            assert_eq!(error.kind(), rivet_core::error::ErrorKind::InvalidArgument);
+            assert!(
+                error.message().contains("include_conversation"),
+                "the message has to name the switch that resolves it: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn saying_you_meant_it_is_accepted_and_is_a_promise() {
+        // The other half: the gate refuses silence, not the request itself.
+        let settings = Settings::from_config(
+            &serde_json::json!({"topics": ["agent."], "include_conversation": true}),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.topics,
+            ["agent."],
+            "`agent.` already covers the conversation; adding it again is noise"
+        );
+        assert!(settings.promised.contains(&"agent.".to_string()));
+    }
+
+    #[test]
+    fn a_prefix_narrower_than_the_conversation_is_not_the_conversation() {
+        // `agent.turn.` neither covers nor is covered by `agent.text.`, so it is unaffected.
+        let settings =
+            Settings::from_config(&serde_json::json!({"topics": ["agent.turn."]})).unwrap();
+        assert_eq!(settings.topics, ["agent.turn."]);
+    }
+
+    #[test]
+    fn a_second_subscribe_grant_is_joined_rather_than_the_first_winning() {
+        // `PermissionSet` dedups only equal values and the meet pushes a result per meeting
+        // pair, so two `EventsSubscribe` entries genuinely reach a plugin. Reading the first
+        // made the answer depend on sort order: `agent.` sorts first, and `tool.` -- which
+        // the grant carries -- was reported as removed.
+        let grant = [
+            Permission::EventsSubscribe(Some(TopicScope::new(["agent.".to_string()]).unwrap())),
+            Permission::EventsSubscribe(Some(TopicScope::new(["tool.".to_string()]).unwrap())),
+        ];
+        let settings = Settings {
+            topics: vec!["tool.".to_string()],
+            promised: vec!["tool.".to_string()],
+            ..Settings::default()
+        };
+        assert!(
+            settings.broken_promises(&grant).is_empty(),
+            "the grant carries `tool.` in its second entry: {:?}",
+            settings.narrowed_by(&grant)
         );
     }
 }

@@ -169,9 +169,15 @@ fn the_job_panel_says_where_jobs_come_from_when_empty() {
 fn the_status_bar_counts_drops_from_the_lag_report() {
     // The self-consistent bit of the design: the bus reports what it lost, so the UI can
     // show it. And the sum is a floor, which the `≥` says out loud.
+    //
+    // Whose losses, though. A report names the subscriber that fell behind, and summing
+    // every report on the bus made a slow telemetry plugin's drops read as this screen's
+    // own -- a `--tui` user would conclude they had missed 42 events they had in fact all
+    // received. The two are counted apart because they are two different facts about two
+    // different consumers.
     let state = fold(vec![
         Event::Runtime(RuntimeEvent::SubscriberLagged {
-            subscriber: "render.tui".into(),
+            subscriber: rivet_tui::SUBSCRIBER_NAME.into(),
             dropped: 12,
         }),
         Event::Runtime(RuntimeEvent::SubscriberLagged {
@@ -179,11 +185,15 @@ fn the_status_bar_counts_drops_from_the_lag_report() {
             dropped: 30,
         }),
     ]);
-    assert_eq!(state.status.dropped, 42);
+    assert_eq!(state.status.dropped, 12, "this screen's own losses");
+    assert_eq!(state.status.dropped_elsewhere, 30, "somebody else's");
+
+    let line = status_line(&state, 200);
+    assert!(line.contains("≥12 dropped"), "{line}");
+    assert!(line.contains("30 elsewhere"), "{line}");
     assert!(
-        status_line(&state, 200).contains("≥42 dropped"),
-        "{}",
-        status_line(&state, 200)
+        !line.contains("42"),
+        "the two must not be added together anywhere on the bar: {line}"
     );
 }
 

@@ -224,6 +224,29 @@ impl Workspace {
         self.dir.path()
     }
 
+    /// Rewrite `[plugins].enabled` in this workspace's config.
+    pub fn enable_plugins(&self, ids: &[&str]) {
+        let path = self.dir.path().join("rivet.toml");
+        let config = std::fs::read_to_string(&path).expect("read config");
+        let list = ids
+            .iter()
+            .map(|id| format!("\"{id}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let replaced = config
+            .lines()
+            .map(|line| {
+                if line.starts_with("enabled = ") {
+                    format!("enabled = [{list}]")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, replaced + "\n").expect("write config");
+    }
+
     pub fn sessions_dir(&self) -> PathBuf {
         self.dir.path().join(".rivet/sessions")
     }

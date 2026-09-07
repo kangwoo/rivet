@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use rivet_core::event::ToolEvent;
 use rivet_core::event::{AgentEvent, Event, EventEnvelope, JobEvent, PluginEvent, RuntimeEvent};
 
+use crate::SUBSCRIBER_NAME;
+
 /// How many **bytes** of streamed text the agent panel keeps.
 ///
 /// Bytes, because what the cap is for is bounding memory, and a character is between one
@@ -119,11 +121,21 @@ pub struct StatusView {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub tool_calls: u32,
-    /// Events the bus reported as lost, summed over the reports **this UI saw**.
+    /// Events **this UI** lost, summed over the reports it saw.
+    ///
+    /// Its own, by subscriber name. A lag report names who fell behind, and summing every
+    /// report on the bus told a `--tui` user that their screen had missed the events a slow
+    /// telemetry plugin missed — a number about somebody else, rendered in the first person.
     ///
     /// A floor, not a total: a subscriber far enough behind can miss its own lag report.
     /// The help line says so.
     pub dropped: u64,
+    /// The same, for every *other* subscriber on the bus.
+    ///
+    /// Kept rather than discarded because it is worth seeing — a plugin falling behind is
+    /// the operator's problem too — but kept apart, because it is not what this screen
+    /// missed.
+    pub dropped_elsewhere: u64,
     /// Plugins loaded, from `plugin.loaded`.
     pub plugins: u32,
     /// Set by `runtime.shutting_down`.
@@ -185,7 +197,6 @@ impl AppState {
             },
             Event::Tool(tool) => match tool {
                 ToolEvent::Requested { call_id, name } => {
-                    self.status.tool_calls += 1;
                     self.push_tool(
                         &call_id.to_string(),
                         ToolLine {
@@ -263,8 +274,15 @@ impl AppState {
             Event::Runtime(runtime) => match runtime {
                 RuntimeEvent::Started { .. } => {}
                 RuntimeEvent::ShuttingDown { .. } => self.status.shutting_down = true,
-                RuntimeEvent::SubscriberLagged { dropped, .. } => {
-                    self.status.dropped += dropped;
+                RuntimeEvent::SubscriberLagged {
+                    subscriber,
+                    dropped,
+                } => {
+                    if subscriber == SUBSCRIBER_NAME {
+                        self.status.dropped += dropped;
+                    } else {
+                        self.status.dropped_elsewhere += dropped;
+                    }
                 }
             },
         }
@@ -326,7 +344,15 @@ impl AppState {
         }
     }
 
+    /// Add a line for a call id being seen for the first time.
+    ///
+    /// The counter lives here rather than in the `tool.requested` arm because this is the
+    /// one place a new call id first appears. Counting on `tool.requested` alone put the
+    /// status bar out of step with the list beside it the moment one of those was dropped —
+    /// and `upsert_tool` exists precisely because the bus drops them: the panel would show N
+    /// lines while the bar said `N-1 tool`, on the same screen.
     fn push_tool(&mut self, call_id: &str, line: ToolLine) {
+        self.status.tool_calls += 1;
         self.run.tools.push(line);
         self.run
             .tool_index
@@ -439,6 +465,39 @@ mod tests {
         })));
         assert_eq!(state.run.tools.len(), 1);
         assert_eq!(state.run.tools[0].status, ToolStatus::Done);
+    }
+
+    #[test]
+    fn the_counter_and_the_list_beside_it_agree() {
+        // The bar said `N-1 tool` next to a panel showing N lines. `tool.requested` was the
+        // only thing that counted, and the bus drops events -- `upsert_tool` exists because
+        // it does -- so one lost `tool.requested` desynchronised the two for the rest of the
+        // run, on the same screen.
+        let mut state = AppState::default();
+        state.apply(&envelope(Event::Tool(ToolEvent::Completed {
+            call_id: ToolCallId::new(),
+            is_error: false,
+            duration_ms: 12,
+        })));
+        assert_eq!(state.run.tools.len(), 1);
+        assert_eq!(
+            state.status.tool_calls, 1,
+            "a call the panel shows is a call the bar counts"
+        );
+
+        // And a call whose whole life is seen is still counted once, not twice.
+        let call = ToolCallId::new();
+        state.apply(&envelope(Event::Tool(ToolEvent::Requested {
+            call_id: call,
+            name: "search".into(),
+        })));
+        state.apply(&envelope(Event::Tool(ToolEvent::Completed {
+            call_id: call,
+            is_error: false,
+            duration_ms: 3,
+        })));
+        assert_eq!(state.run.tools.len(), 2);
+        assert_eq!(state.status.tool_calls, 2);
     }
 
     #[test]

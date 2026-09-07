@@ -102,34 +102,13 @@ pub fn effective_topics(
 
 /// Every `EventsSubscribe` in the grant, joined into one.
 ///
-/// Not "the first one". A manifest may write `[[permissions]]` twice — `PermissionSet`'s
-/// dedup folds only values that are *equal*, and `intersect` pushes a result per meeting
-/// pair — so two can genuinely survive into `effective`. Taking the first would quietly
-/// narrow or widen depending on sort order; the plugin holds both, so the answer is their
-/// join. `None` (every topic) absorbs everything, and `TopicScope::new` absorbs a prefix
-/// another entry already covers, so the joined result stays an antichain.
+/// The rule and its reasoning live on [`Permission::join_events_subscribe`], in
+/// `rivet-core` beside the `meet` it has to agree with. It is shared rather than local
+/// because a plugin that reads its own grant needs the same answer and cannot depend on
+/// this crate: `rivet.telemetry-log` sees only `rivet-core`, and its own copy of this loop
+/// stopped at the first match.
 fn join_subscribe_grants(granted: &[Permission]) -> Option<Permission> {
-    let mut found = false;
-    let mut prefixes: Vec<String> = Vec::new();
-    for permission in granted {
-        let Permission::EventsSubscribe(scope) = permission else {
-            continue;
-        };
-        found = true;
-        match scope {
-            // Unscoped: every topic, and nothing can narrow a join.
-            None => return Some(Permission::EventsSubscribe(None)),
-            Some(topics) => prefixes.extend(topics.as_slice().iter().cloned()),
-        }
-    }
-    if !found {
-        return None;
-    }
-    // `found` is true and every scoped entry contributed at least one prefix, so this
-    // cannot be empty and the constructor cannot fail.
-    TopicScope::new(prefixes)
-        .ok()
-        .map(|topics| Permission::EventsSubscribe(Some(topics)))
+    Permission::join_events_subscribe(granted)
 }
 
 /// The two sentences of failure mode 4. The operator's next move is different, so the
