@@ -710,7 +710,7 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
 
    **`EventsSubscribe`는 해결됐다 (Phase 3 착수 전).** 두 가지를 정했다.
 
-   첫째, **permission이 scope를 갖는다** — `EventsSubscribe(Option<Vec<String>>)`,
+   첫째, **permission이 scope를 갖는다** — `EventsSubscribe(Option<TopicScope>)`,
    토픽 **접두사** 목록이고 `None`이 전체다. 어휘 안에서 내용을 나르는 나머지
    (`FsRead` · `NetworkHttp` · `SecretsRead`)는 전부 scope를 다는데 이것만 맨몸이었고,
    `EventSubscriber::topics()`는 **구독자 자신의 선호**라 기본값이 "전부"다. 즉 scope가
