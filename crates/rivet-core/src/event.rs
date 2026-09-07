@@ -101,11 +101,22 @@ impl Event {
     /// wildcard-free `match`es, and a `match` needs values — hand out `&'static str` and
     /// today's compile error becomes tomorrow's runtime surprise.
     ///
-    /// This function is a `vec![]` literal, so it cannot itself notice a missing variant.
-    /// What notices is the sequence: add a variant, a caller's `match` fails to compile,
-    /// add the arm, the arm's topic is absent from the caller's expected list, the test
-    /// fails, come back here. `every_sample_has_a_distinct_topic` catches only the
-    /// copy-paste duplicate.
+    /// # Why every one of these lists checks itself
+    ///
+    /// A list — a `vec![]` literal, or these five `extend` calls — is not
+    /// exhaustiveness-checked, so on its own it cannot notice something missing. The
+    /// argument that used to stand here was that the *sequence* covers it: add a variant, a
+    /// caller's `match` fails to compile, add the arm, and the arm's topic then fails the
+    /// caller's assertion. The middle step is where it breaks. Writing the arm makes
+    /// everything compile again, the variant is still absent from this list, and the
+    /// assertion never runs on it — so the answer the arm just recorded, including "yes,
+    /// the narrowed profiles are granted this topic", goes untested. Measured on the tree
+    /// before this: a new variant whose topic no profile grants, answered `true`, left the
+    /// whole suite green.
+    ///
+    /// So each list walks its own result through a wildcard-free `match` immediately below
+    /// it. Adding a variant is then a compile error *at the list it has to be added to*,
+    /// which is what the tripwire was always supposed to be.
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
         let mut all: Vec<Self> = AgentEvent::one_of_each()
@@ -116,6 +127,17 @@ impl Event {
         all.extend(JobEvent::one_of_each().into_iter().map(Self::Job));
         all.extend(PluginEvent::one_of_each().into_iter().map(Self::Plugin));
         all.extend(RuntimeEvent::one_of_each().into_iter().map(Self::Runtime));
+        for event in &all {
+            // A whole new *family* is the one this layer catches, beside the `extend` that
+            // has to gather it.
+            match event {
+                Self::Agent(_)
+                | Self::Tool(_)
+                | Self::Job(_)
+                | Self::Plugin(_)
+                | Self::Runtime(_) => {}
+            }
+        }
         all
     }
 }
@@ -190,13 +212,8 @@ impl AgentEvent {
     /// Exists for `rivet-cli`'s check that every agent topic is either granted to the
     /// narrowed profiles or deliberately withheld: adding a variant has to break that
     /// test rather than quietly fall outside the grant. [`Event::one_of_each`] gathers
-    /// this and its four siblings so the same check covers every family.
-    ///
-    /// A `vec!` literal is not exhaustiveness-checked, so the list alone would let a new
-    /// variant be answered for in that test and still never be *tested* — the test's own
-    /// `match` would compile once the answer was written, and the topic it claims to grant
-    /// would go unchecked. The wildcard-free `match` below is what makes the list itself
-    /// a compile error to forget.
+    /// this and its four siblings so the same check covers every family, and explains why
+    /// each of these lists ends in a `match` over what it just built.
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
         use crate::model::{StopReason, Usage};
@@ -231,7 +248,8 @@ impl AgentEvent {
         ];
         for event in &all {
             // No wildcard: a new variant fails to compile *here*, one line below the list
-            // it has to be added to.
+            // it has to be added to. See [`Event::one_of_each`] for why the caller's own
+            // `match` is not enough.
             match event {
                 Self::RunStarted { .. }
                 | Self::TurnStarted { .. }
@@ -309,7 +327,7 @@ impl ToolEvent {
     /// One value per variant. See [`Event::one_of_each`].
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
-        vec![
+        let all = vec![
             Self::Requested {
                 call_id: ToolCallId::new(),
                 name: "t".into(),
@@ -345,7 +363,22 @@ impl ToolEvent {
                 call_id: ToolCallId::new(),
                 reason: String::new(),
             },
-        ]
+        ];
+        for event in &all {
+            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
+            // fail to compile at the list, not only at the caller that reads it.
+            match event {
+                Self::Requested { .. }
+                | Self::PolicyEvaluated { .. }
+                | Self::ApprovalRequested { .. }
+                | Self::ApprovalResolved { .. }
+                | Self::Started { .. }
+                | Self::Progress { .. }
+                | Self::Completed { .. }
+                | Self::Blocked { .. } => {}
+            }
+        }
+        all
     }
 }
 
@@ -392,7 +425,7 @@ impl JobEvent {
     /// One value per variant. See [`Event::one_of_each`].
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
-        vec![
+        let all = vec![
             Self::Created {
                 job_id: JobId::new(),
                 goal: String::new(),
@@ -416,7 +449,19 @@ impl JobEvent {
                 job_id: JobId::new(),
                 verdict: crate::job::ReviewVerdict::Approve,
             },
-        ]
+        ];
+        for event in &all {
+            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
+            // fail to compile at the list, not only at the caller that reads it.
+            match event {
+                Self::Created { .. }
+                | Self::StateChanged { .. }
+                | Self::RunAttached { .. }
+                | Self::ReviewRequested { .. }
+                | Self::ReviewCompleted { .. } => {}
+            }
+        }
+        all
     }
 }
 
@@ -458,7 +503,7 @@ impl PluginEvent {
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
         let plugin_id = PluginId::new("p.sample").expect("a literal plugin id is valid");
-        vec![
+        let all = vec![
             Self::Discovered {
                 plugin_id: plugin_id.clone(),
             },
@@ -471,7 +516,18 @@ impl PluginEvent {
                 error: String::new(),
             },
             Self::Unloaded { plugin_id },
-        ]
+        ];
+        for event in &all {
+            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
+            // fail to compile at the list, not only at the caller that reads it.
+            match event {
+                Self::Discovered { .. }
+                | Self::Loaded { .. }
+                | Self::LoadFailed { .. }
+                | Self::Unloaded { .. } => {}
+            }
+        }
+        all
     }
 }
 
@@ -506,7 +562,7 @@ impl RuntimeEvent {
     /// One value per variant. See [`Event::one_of_each`].
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
-        vec![
+        let all = vec![
             Self::Started {
                 version: String::new(),
             },
@@ -517,7 +573,17 @@ impl RuntimeEvent {
                 subscriber: String::new(),
                 dropped: 0,
             },
-        ]
+        ];
+        for event in &all {
+            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
+            // fail to compile at the list, not only at the caller that reads it.
+            match event {
+                Self::Started { .. }
+                | Self::ShuttingDown { .. }
+                | Self::SubscriberLagged { .. } => {}
+            }
+        }
+        all
     }
 }
 
