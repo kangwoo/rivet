@@ -75,11 +75,6 @@ impl CapabilityKind {
     }
 }
 
-/// A permission a plugin may request in its manifest and a sandbox may enforce.
-///
-/// The permission set is a *closed vocabulary* on purpose. If a plugin needs something
-/// not expressible here, that is a signal to extend the contract deliberately, not to add
-/// an escape hatch.
 /// A set of exact strings — hosts, secret keys — canonical by construction.
 ///
 /// Scope lists are sets. Carried as a bare `Vec` they are not: two orderings of one set
@@ -99,15 +94,19 @@ impl StringSet {
     ///
     /// # Errors
     /// [`crate::error::ErrorKind::InvalidArgument`] for an empty set or an empty member.
-    /// An empty allowlist grants nothing, which is never what a manifest means; it should
-    /// leave the scope out instead.
+    /// An empty allowlist grants nothing, which is never what a manifest means.
+    ///
+    /// The message does not say "leave the scope out instead": that is the fix for
+    /// `network_http`, and the *opposite* of the fix for `secrets_read`, which has no
+    /// unscoped form at all. This constructor cannot tell which one it is holding, and
+    /// advice that is wrong for half its callers is worse than none.
     pub fn new(items: impl IntoIterator<Item = String>) -> crate::Result<Self> {
         let mut out: Vec<String> = items.into_iter().collect();
         out.sort();
         out.dedup();
         if out.is_empty() {
             return Err(crate::Error::invalid_argument(
-                "an empty scope list grants nothing; leave the scope out to ask for all",
+                "an empty scope list grants nothing, which is never what a manifest means",
             ));
         }
         if out.iter().any(String::is_empty) {
@@ -128,8 +127,10 @@ impl StringSet {
     /// The caller happens to hand this a sorted, deduplicated list of non-empty members,
     /// so a cheaper constructor that trusted it would be correct today. It would also be
     /// the exact trust this type exists to remove, one level down — so it re-sorts a
-    /// sorted vector inside a function only a meet reaches, and buys the invariant.
-    fn from_canonical(items: Vec<String>) -> Option<Self> {
+    /// sorted vector inside a function only a meet reaches, and buys the invariant. The
+    /// name says `unsorted` for that reason: what it is handed is an input to canonicalise,
+    /// not a canonical form to wrap.
+    fn from_unsorted(items: Vec<String>) -> Option<Self> {
         Self::new(items).ok()
     }
 }
@@ -173,7 +174,7 @@ impl TopicScope {
                 "a topic scope has an empty prefix, which matches every topic",
             ));
         }
-        Ok(Self(Self::absorb(&sorted)))
+        Ok(Self(Self::absorb(sorted)))
     }
 
     #[must_use]
@@ -189,21 +190,21 @@ impl TopicScope {
     /// covered by it, so once `p` is kept, every later entry `p` covers is contiguous with
     /// it through the ones already dropped. Comparing against the previous *input* entry
     /// instead would keep `["a", "ac"]` — not an antichain.
-    fn absorb(sorted: &[String]) -> Vec<String> {
+    fn absorb(sorted: Vec<String>) -> Vec<String> {
         let mut out: Vec<String> = Vec::with_capacity(sorted.len());
         for prefix in sorted {
             if out
                 .last()
                 .is_none_or(|kept| !prefix.starts_with(kept.as_str()))
             {
-                out.push(prefix.clone());
+                out.push(prefix);
             }
         }
         out
     }
 
     /// The meet's result, through the same door as everything else. See
-    /// [`StringSet::from_canonical`] for why this validates rather than trusting.
+    /// [`StringSet::from_unsorted`] for why this validates rather than trusting.
     fn from_unsorted(items: Vec<String>) -> Option<Self> {
         Self::new(items).ok()
     }
@@ -244,6 +245,11 @@ impl<'de> Deserialize<'de> for TopicScope {
     }
 }
 
+/// A permission a plugin may request in its manifest and a sandbox may enforce.
+///
+/// The permission set is a *closed vocabulary* on purpose. If a plugin needs something
+/// not expressible here, that is a signal to extend the contract deliberately, not to add
+/// an escape hatch.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "permission", content = "scope")]
 pub enum Permission {
@@ -360,7 +366,7 @@ impl Permission {
                     Some(Self::NetworkHttp(Some(list.clone())))
                 }
                 (Some(x), Some(y)) => {
-                    StringSet::from_canonical(intersect_sorted(x.as_slice(), y.as_slice()))
+                    StringSet::from_unsorted(intersect_sorted(x.as_slice(), y.as_slice()))
                         .map(|hosts| Self::NetworkHttp(Some(hosts)))
                 }
             },
@@ -375,7 +381,7 @@ impl Permission {
                 }
             },
             (Self::SecretsRead(a), Self::SecretsRead(b)) => {
-                StringSet::from_canonical(intersect_sorted(a.as_slice(), b.as_slice()))
+                StringSet::from_unsorted(intersect_sorted(a.as_slice(), b.as_slice()))
                     .map(Self::SecretsRead)
             }
             // The remaining variants carry no scope: they meet only with themselves.
@@ -456,11 +462,13 @@ fn meet_prefixes(a: &[String], b: &[String]) -> Vec<String> {
     out
 }
 
+/// The exact strings both sides name.
+///
+/// Both operands come from a [`StringSet`], so they arrive sorted and deduplicated and a
+/// filtered subsequence of `a` is too: the result needs no sort of its own, and
+/// [`StringSet::from_unsorted`] would redo one anyway.
 fn intersect_sorted(a: &[String], b: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = a.iter().filter(|k| b.contains(k)).cloned().collect();
-    out.sort();
-    out.dedup();
-    out
+    a.iter().filter(|k| b.contains(k)).cloned().collect()
 }
 
 /// The set of permissions actually granted to a running unit of work.
@@ -687,6 +695,29 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<TopicScope>(r#"["tool."]"#).is_ok());
+
+        // And at the shape a manifest actually arrives in, not only the scope on its own.
+        // `Permission` is adjacently tagged, so the scope is deserialized as the *content*
+        // of a variant; the refusal has to survive that, and an absent `scope` still has to
+        // mean "all". This is what the check being in the constructor buys, so it is what
+        // the test has to hold.
+        for wire in [
+            r#"{"permission":"events_subscribe","scope":[]}"#,
+            r#"{"permission":"events_subscribe","scope":[""]}"#,
+            r#"{"permission":"network_http","scope":[]}"#,
+            r#"{"permission":"network_http","scope":[""]}"#,
+            r#"{"permission":"secrets_read","scope":[]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Permission>(wire).is_err(),
+                "`{wire}` must not deserialize"
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<Permission>(r#"{"permission":"events_subscribe"}"#).unwrap(),
+            Permission::EventsSubscribe(None),
+            "an absent scope is still the widest grant"
+        );
     }
 
     /// Topic scopes are prefixes, so their meet is not the set intersection hosts get.

@@ -623,17 +623,29 @@ mod tests {
             }
         }
 
-        let granted = super::Profile::ReadOnly.permissions();
-        for event in Event::one_of_each() {
-            let wanted = Permission::EventsSubscribe(Some(
-                TopicScope::new([event.topic().to_string()]).expect("a real topic"),
-            ));
-            assert_eq!(
-                granted.allows(&wanted),
-                should_reach_a_narrowed_profile(&event),
-                "`{}` — grant it in `Profile::subscribable_topics`, or say `false` above",
-                event.topic()
-            );
+        // Both axes. Every family, because a new one falls outside the grant as silently
+        // as a new variant does; and all three profiles, because they share
+        // `subscribable_topics` today as an implementation detail rather than a promise --
+        // the day one of them stops sharing it is the day this has to notice.
+        for profile in [
+            super::Profile::ReadOnly,
+            super::Profile::Reviewer,
+            super::Profile::Production,
+        ] {
+            let granted = profile.permissions();
+            for event in Event::one_of_each() {
+                let wanted = Permission::EventsSubscribe(Some(
+                    TopicScope::new([event.topic().to_string()]).expect("a real topic"),
+                ));
+                assert_eq!(
+                    granted.allows(&wanted),
+                    should_reach_a_narrowed_profile(&event),
+                    "`{}` under `{}` — grant it in `Profile::subscribable_topics`, \
+                     or say `false` above",
+                    event.topic(),
+                    profile.name()
+                );
+            }
         }
     }
 

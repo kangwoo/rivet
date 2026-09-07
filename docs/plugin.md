@@ -89,6 +89,11 @@ major `0`은 Cargo와 같이 **모든 minor 변경을 breaking으로** 취급한
 | `secrets_read` | `["DEEPSEEK_API_KEY"]` | 필수, 비어 있을 수 없음 |
 | 나머지 전부 | 없음 | `scope`를 적으면 에러 |
 
+목록형 `scope`(`network_http` · `secrets_read` · `events_subscribe`)는 **집합**이다.
+`StringSet`·`TopicScope`가 생성 시점에 정렬·중복 제거하므로 적은 순서가 판정을 바꾸지
+않고, `rivet plugin show`도 그 정규형으로 찍는다. 빈 배열뿐 아니라 **빈 항목**(`[""]`)도
+에러다 — 호스트·키에서는 아무것도 가리키지 않고, 토픽에서는 전부에 걸린다(아래 참조).
+
 `{ subtree = "../../../etc" }`처럼 워크스페이스를 벗어나는 하위 트리는 **파싱 시점에**
 거부된다. 나중에 meet에서 조용히 사라지게 두면, 매니페스트가 잘못됐다는 사실 대신 권한이
 0개인 채로 로드된 plugin이 남는다.

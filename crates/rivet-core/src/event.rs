@@ -191,10 +191,16 @@ impl AgentEvent {
     /// narrowed profiles or deliberately withheld: adding a variant has to break that
     /// test rather than quietly fall outside the grant. [`Event::one_of_each`] gathers
     /// this and its four siblings so the same check covers every family.
+    ///
+    /// A `vec!` literal is not exhaustiveness-checked, so the list alone would let a new
+    /// variant be answered for in that test and still never be *tested* — the test's own
+    /// `match` would compile once the answer was written, and the topic it claims to grant
+    /// would go unchecked. The wildcard-free `match` below is what makes the list itself
+    /// a compile error to forget.
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
         use crate::model::{StopReason, Usage};
-        vec![
+        let all = vec![
             Self::RunStarted {
                 agent_id: crate::id::AgentId::new(),
                 model: crate::model::ModelId::new("p/m").expect("valid"),
@@ -222,7 +228,22 @@ impl AgentEvent {
                 turns: 1,
                 stop: crate::agent::StopReason::EndTurn,
             },
-        ]
+        ];
+        for event in &all {
+            // No wildcard: a new variant fails to compile *here*, one line below the list
+            // it has to be added to.
+            match event {
+                Self::RunStarted { .. }
+                | Self::TurnStarted { .. }
+                | Self::RequestStarted { .. }
+                | Self::TextDelta { .. }
+                | Self::RequestCompleted { .. }
+                | Self::RequestFailed { .. }
+                | Self::TurnCompleted { .. }
+                | Self::RunCompleted { .. } => {}
+            }
+        }
+        all
     }
 }
 
