@@ -67,10 +67,17 @@ fn profile_grant(narrowed: bool) -> PermissionSet {
 }
 
 /// Load the plugin with `config` under `grant`.
+///
+/// The loader comes back with the bus because the caller has to hold it: it owns the
+/// registry, the subscriber table and the pump handles, and a test that let it go would be
+/// asking about a plugin whose host has gone. It used to be `mem::forget`ed under a comment
+/// saying it was dropped — neither of which is what a test wants, and the `forget` bought
+/// nothing either, since dropping a `PluginLoader` does not abort those pumps anyway (a
+/// dropped `JoinHandle` detaches, and the root token is not cancelled on drop).
 async fn load(
     grant: PermissionSet,
     config: serde_json::Value,
-) -> (rivet_core::Result<()>, BroadcastBus) {
+) -> (rivet_core::Result<()>, BroadcastBus, PluginLoader) {
     let bus = BroadcastBus::new();
     let registry = Registry::new(bus.clone());
     let events = registry.events();
@@ -78,9 +85,7 @@ async fn load(
     loader.discover(&[source()]).expect("discover");
     loader.validate();
     let result = loader.load(&plugin_id(), config).await;
-    // The loader is dropped here; the registry and its pump outlive it through `bus`.
-    std::mem::forget(loader);
-    (result, bus)
+    (result, bus, loader)
 }
 
 #[tokio::test]
@@ -90,7 +95,7 @@ async fn the_default_topics_survive_every_shipped_profile() {
     // configured loads wherever it is enabled -- which is what makes "no config needed"
     // true rather than true-on-a-developer-laptop.
     for narrowed in [false, true] {
-        let (result, _bus) = load(profile_grant(narrowed), serde_json::Value::Null).await;
+        let (result, _bus, _loader) = load(profile_grant(narrowed), serde_json::Value::Null).await;
         result.unwrap_or_else(|e| panic!("narrowed={narrowed}: {e}"));
     }
 
@@ -111,7 +116,7 @@ async fn a_readonly_profile_refuses_a_telemetry_plugin_that_was_told_to_log_the_
     // The guard cannot catch this: prefixes meet as a union, so six of the seven survive
     // and the meet is not empty. The plugin catches it, because the operator *wrote*
     // `include_conversation = true` and the answer is no.
-    let (result, _bus) = load(
+    let (result, _bus, _loader) = load(
         profile_grant(true),
         serde_json::json!({ "include_conversation": true }),
     )
@@ -126,7 +131,7 @@ async fn a_readonly_profile_refuses_a_telemetry_plugin_that_was_told_to_log_the_
 #[tokio::test]
 async fn a_developer_profile_allows_the_conversation_when_asked() {
     // The other half: the refusal above is the profile's doing, not a blanket ban.
-    let (result, _bus) = load(
+    let (result, _bus, _loader) = load(
         profile_grant(false),
         serde_json::json!({ "include_conversation": true }),
     )
@@ -136,9 +141,13 @@ async fn a_developer_profile_allows_the_conversation_when_asked() {
 
 #[tokio::test]
 async fn configured_topics_the_profile_narrows_are_refused_not_silently_dropped() {
-    let (result, _bus) = load(
+    // `include_conversation` is written out because `agent.text.` in a `topics` list is now
+    // refused on its own -- subscribing to the prefix is what logs the conversation, so the
+    // switch guards the written list and not just the default one. Saying it here is how an
+    // operator expresses this configuration at all, and the profile is what then refuses it.
+    let (result, _bus, _loader) = load(
         profile_grant(true),
-        serde_json::json!({ "topics": ["tool.", "agent.text."] }),
+        serde_json::json!({ "topics": ["tool.", "agent.text."], "include_conversation": true }),
     )
     .await;
     let error = result.expect_err("a written list is a promise");
@@ -156,7 +165,7 @@ async fn the_default_list_narrowed_by_a_grant_loads_anyway() {
     let grant = PermissionSet::new([Permission::EventsSubscribe(Some(
         TopicScope::new(["tool.".to_string()]).unwrap(),
     ))]);
-    let (result, _bus) = load(grant, serde_json::Value::Null).await;
+    let (result, _bus, _loader) = load(grant, serde_json::Value::Null).await;
     result.expect("the default list bends; a configured one does not");
 }
 
@@ -237,7 +246,7 @@ async fn the_telemetry_plugin_logs_what_it_receives() {
         .with(CaptureLayer(captured.clone()))
         .set_default();
 
-    let (result, bus) = load(profile_grant(false), serde_json::Value::Null).await;
+    let (result, bus, _loader) = load(profile_grant(false), serde_json::Value::Null).await;
     result.expect("load");
 
     let session = rivet_core::id::SessionId::new();
@@ -285,7 +294,7 @@ async fn every_log_record_names_its_topic_and_its_run() {
         .with(CaptureLayer(captured.clone()))
         .set_default();
 
-    let (result, bus) = load(profile_grant(false), serde_json::Value::Null).await;
+    let (result, bus, _loader) = load(profile_grant(false), serde_json::Value::Null).await;
     result.expect("load");
 
     let session = rivet_core::id::SessionId::new();

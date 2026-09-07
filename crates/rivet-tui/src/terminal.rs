@@ -47,12 +47,26 @@ impl TerminalGuard {
             }));
         });
         terminal::enable_raw_mode()?;
+        // Past this line a failure has to undo raw mode by hand. `Self` does not exist yet,
+        // so there is no `Drop` to lean on and no guard for the caller to restore: a bare
+        // `?` here returns `Err` with the terminal still raw, and the shell the user comes
+        // back to no longer echoes what they type. That is the exact failure `is_a_terminal`
+        // was added to prevent, arriving through the other door.
         let mut out = io::stdout();
-        execute!(out, EnterAlternateScreen)?;
-        let terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(out))?;
-        Ok(Self {
-            terminal: Some(terminal),
-        })
+        if let Err(error) = execute!(out, EnterAlternateScreen) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error);
+        }
+        // From here the alternate screen is on too, so the full `restore` is what undoes it.
+        match ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(out)) {
+            Ok(terminal) => Ok(Self {
+                terminal: Some(terminal),
+            }),
+            Err(error) => {
+                restore();
+                Err(error)
+            }
+        }
     }
 
     /// The terminal to draw on.

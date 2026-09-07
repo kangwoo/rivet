@@ -10,6 +10,7 @@
 //! `docs/architecture.md` §5.3's rule that subscribers observe and interceptors decide.
 
 use std::fmt;
+use std::future::Future;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
@@ -69,26 +70,72 @@ impl Tui {
             .clone()
     }
 
+    /// Draw one frame from the state as it stands.
+    ///
+    /// Under the lock rather than over a clone. `draw` takes `&AppState`, so cloning bought
+    /// nothing and cost a deep copy of the text buffer, the tool list and its index twenty
+    /// times a second — on the worker the pump wants. The lock is held for exactly one
+    /// frame, which is shorter than the clone plus the frame it replaced, and there is no
+    /// `await` inside it.
+    fn draw_frame<B: ratatui::backend::Backend>(
+        &self,
+        terminal: &mut ratatui::Terminal<B>,
+    ) -> std::io::Result<()> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        terminal.draw(|frame| draw(frame, &state))?;
+        Ok(())
+    }
+
     /// Redraw on a tick, and turn key presses into [`Intent`]s, until `cancel` fires.
     ///
     /// # Errors
     /// Anything the terminal backend reports while drawing or polling.
-    pub async fn render_loop(
+    pub async fn render_loop<B: ratatui::backend::Backend>(
         &self,
-        terminal: &mut ratatui::DefaultTerminal,
+        terminal: &mut ratatui::Terminal<B>,
         cancel: CancellationToken,
     ) -> std::io::Result<()> {
+        // `poll` blocks a thread, so it runs on the blocking pool with a short budget: the
+        // tick is what bounds how long a cancelled run keeps a terminal in raw mode.
+        self.drive(terminal, cancel, || read_key(TICK)).await
+    }
+
+    /// [`Tui::render_loop`] with the key source handed in.
+    ///
+    /// Generic over the backend *and* the source because neither is available to a test:
+    /// `DefaultTerminal` needs a real terminal, and `crossterm::event::poll` needs a real
+    /// one too — it fails outright with "failed to initialize input reader" when stdin is
+    /// not a tty, which is every `cargo test`. What is worth pinning here is the shape of
+    /// the loop, and the shape does not care where a key comes from.
+    async fn drive<B, K, Fut>(
+        &self,
+        terminal: &mut ratatui::Terminal<B>,
+        cancel: CancellationToken,
+        mut next_key: K,
+    ) -> std::io::Result<()>
+    where
+        B: ratatui::backend::Backend,
+        K: FnMut() -> Fut,
+        Fut: Future<Output = std::io::Result<Option<KeyEvent>>>,
+    {
         loop {
-            terminal.draw(|frame| draw(frame, &self.snapshot()))?;
+            self.draw_frame(terminal)?;
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            // `poll` blocks a thread, so it runs on the blocking pool with a short budget:
-            // the tick is what bounds how long a cancelled run keeps a terminal in raw
-            // mode.
             let key = tokio::select! {
-                () = cancel.cancelled() => return Ok(()),
-                key = read_key(TICK) => key?,
+                () = cancel.cancelled() => {
+                    // One more frame before the screen goes. The host cancels *after* it
+                    // has drained the bus, so the events that describe the ending --
+                    // `runtime.shutting_down` among them -- folded in while this loop was
+                    // parked here. Returning straight away would close the alternate screen
+                    // on a frame that predates all of them, which is why the status bar's
+                    // "shutting down" segment could be rendered, asserted on, and never once
+                    // seen by a user.
+                    self.draw_frame(terminal)?;
+                    return Ok(());
+                }
+                key = next_key() => key?,
             };
             if let Some(key) = key {
                 self.handle_key(key);
@@ -106,10 +153,8 @@ impl Tui {
         let intent = match (key.code, key.modifiers) {
             // Raw mode swallows SIGINT: Ctrl-C arrives as a key, not a signal. Mapping it
             // to `Cancel` is what keeps Phase 1's guarantee true inside the TUI, and the
-            // *second* one is the host's to count -- see `run.rs`.
-            // Ctrl-C and a bare `c` mean the same thing on purpose: raw mode swallows
-            // SIGINT, so Ctrl-C arrives here as a key, and a user who typed `c` alone
-            // meant to cancel too.
+            // *second* one is the host's to count -- see `run.rs`. The modifier is ignored
+            // on purpose: a user who typed a bare `c` meant to cancel too.
             (KeyCode::Char('c'), _) => Some(Intent::Cancel),
             (KeyCode::Char('q') | KeyCode::Esc, _) => Some(Intent::Quit),
             (KeyCode::Tab, _) => {
@@ -152,7 +197,7 @@ async fn read_key(timeout: Duration) -> std::io::Result<Option<KeyEvent>> {
 #[async_trait]
 impl EventSubscriber for Tui {
     fn name(&self) -> &'static str {
-        "render.tui"
+        crate::SUBSCRIBER_NAME
     }
 
     async fn on_event(&self, envelope: &EventEnvelope) {
@@ -219,6 +264,52 @@ mod tests {
         assert!(
             intents.try_recv().is_err(),
             "focus is the UI's own business"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_last_frame_shows_the_state_the_run_ended_in() {
+        // The bug this pins: the loop drew, then parked in `read_key`, and a cancel while
+        // parked returned without drawing again. Everything the host publishes during
+        // shutdown -- after it stops the run and before it takes the screen down -- landed
+        // in `AppState` and was never rendered, so `runtime.shutting_down` could not reach a
+        // user's eyes however correct the fold and the status bar were.
+        let (tui, _intents) = Tui::new();
+        let cancel = CancellationToken::new();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+        // Concurrent on purpose: the frame at issue is the one drawn *after* the loop has
+        // parked, so the event and the cancel have to arrive while it is parked.
+        let feed = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tui.on_event(&EventEnvelope::new(Event::Runtime(
+                rivet_core::event::RuntimeEvent::ShuttingDown {
+                    reason: "run finished".into(),
+                },
+            )))
+            .await;
+            cancel.cancel();
+        };
+        // A key source that never produces one, so the loop parks exactly where the real
+        // `read_key` parks it.
+        let idle = || async {
+            tokio::time::sleep(TICK).await;
+            Ok(None)
+        };
+        let (drawn, ()) = tokio::join!(tui.drive(&mut terminal, cancel.clone(), idle), feed);
+        drawn.expect("the test backend does not fail");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            rendered.contains("shutting down"),
+            "the frame the user is left looking at predates the end of the run: {rendered}"
         );
     }
 

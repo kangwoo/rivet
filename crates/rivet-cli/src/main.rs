@@ -165,7 +165,7 @@ const LOG_FORMAT_ENV: &str = "RIVET_LOG_FORMAT";
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    init_tracing();
+    init_tracing(cli.tui);
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -189,24 +189,52 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// Set up `tracing`'s stderr sink.
+/// Set up `tracing`'s sink.
 ///
 /// The JSON layer is behind an environment variable rather than a flag because the choice
 /// belongs to whoever is *collecting* the logs, not to whoever typed the prompt — and
 /// because `--jsonl` already means something else on this binary. Without it "structured
 /// log" would be half true: the fields exist, and nothing machine-readable comes out.
-fn init_tracing() {
+///
+/// `tui` is the one thing that can take the sink away. See [`log_writer`].
+fn init_tracing(tui: bool) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
     let json = std::env::var(LOG_FORMAT_ENV).is_ok_and(|value| value == "json");
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr);
+        .with_writer(log_writer(tui));
     if json {
         builder.json().init();
     } else {
         builder.init();
     }
+}
+
+/// Where log records go: stderr, unless the TUI is about to own that terminal.
+///
+/// `--tui` puts the alternate screen on the terminal and ratatui diffs each frame against
+/// its own buffer, so a `tracing` line written over the top of it is never repainted — the
+/// damage stays for the rest of the run. With `DEFAULT_LOG_FILTER` raising
+/// `rivet_telemetry_log` to `info`, an enabled telemetry plugin writes one such line *per
+/// bus event*; a single `warn!` from anywhere does it without the plugin.
+///
+/// Only when stderr is that same terminal, though. `rivet --tui 2>run.log` is an operator
+/// asking for both at once, and there is nothing there to collide with — so that keeps its
+/// logs. Which is also why the check is on stderr and not on `is_a_terminal`, which asks
+/// about stdout.
+fn log_writer(tui: bool) -> tracing_subscriber::fmt::writer::BoxMakeWriter {
+    use std::io::IsTerminal;
+    if logs_would_land_on_the_tui(tui, std::io::stderr().is_terminal()) {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::sink)
+    } else {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
+    }
+}
+
+/// The decision [`log_writer`] makes, separated from the terminal it has to ask about.
+const fn logs_would_land_on_the_tui(tui: bool, stderr_is_terminal: bool) -> bool {
+    tui && stderr_is_terminal
 }
 
 async fn dispatch(cli: Cli) -> i32 {
@@ -372,6 +400,24 @@ mod tests {
             "one target is raised, and it is the telemetry plugin: {DEFAULT_LOG_FILTER}"
         );
         assert!(DEFAULT_LOG_FILTER.contains("rivet_telemetry_log=info"));
+    }
+
+    #[test]
+    fn the_tui_gets_the_terminal_to_itself_and_only_the_terminal() {
+        // `--tui` draws on the alternate screen and ratatui diffs against its own buffer, so
+        // a log line written over a frame is never repainted -- and with the directive above
+        // raising the telemetry plugin to `info`, that is one line per bus event.
+        assert!(logs_would_land_on_the_tui(true, true));
+
+        // Redirected stderr is not that terminal. `rivet --tui 2>run.log` asked for both and
+        // there is nothing to collide with, so the logs are kept -- which is also why the
+        // question is about stderr and not about `rivet_tui::is_a_terminal`, which answers
+        // for stdout.
+        assert!(!logs_would_land_on_the_tui(true, false));
+
+        // And without `--tui` nothing owns the screen.
+        assert!(!logs_would_land_on_the_tui(false, true));
+        assert!(!logs_would_land_on_the_tui(false, false));
     }
 
     #[test]

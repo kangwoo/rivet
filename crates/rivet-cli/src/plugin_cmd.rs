@@ -59,20 +59,24 @@ pub fn list(config: &Config) -> rivet_core::Result<()> {
         }
     }
     // The `ENABLED` column already answers "is this one on", which is what an operator
-    // usually wants. What it cannot say is *why* something is off in a tree with no config
-    // file, so name the opt-in plugins once rather than adding a column that repeats
-    // `ENABLED` everywhere except here.
-    let default = catalog::default_selection();
-    let opt_in: Vec<&str> = loader
+    // usually wants. What it cannot say is *what to do about it*, so name the ones that are
+    // off once rather than adding a column that repeats `ENABLED` everywhere except here.
+    //
+    // Against `enabled`, which is what the column shows, and not against
+    // `default_selection()`. Those two differ exactly when the operator has written a
+    // config -- so the footer used to tell somebody who had already put the plugin in
+    // `[plugins].enabled`, on the line under a row reading `ENABLED yes`, to go and put it
+    // in `[plugins].enabled`.
+    let off: Vec<&str> = loader
         .records()
         .iter()
-        .filter(|record| !default.contains(&record.id) && record.id != catalog::context_plugin_id())
+        .filter(|record| !enabled.contains(&record.id))
         .map(|record| record.id.as_str())
         .collect();
-    if !opt_in.is_empty() {
+    if !off.is_empty() {
         println!(
-            "\nnot in the default selection; name them in `[plugins].enabled` to load them: {}",
-            opt_in.join(", ")
+            "\nnot enabled here; name them in `[plugins].enabled` to load them: {}",
+            off.join(", ")
         );
     }
     println!("\nrun `rivet doctor` to load them and see what each one registers");

@@ -186,6 +186,12 @@ api_key_env = "DEEPSEEK_API_KEY"
 (기본)이면 그 접두사를 **구독하지도 않는다** — 길이만 세는 것도 안 한다. 세려면 받아야 하고,
 받으면 어딘가에 남는다.
 
+**그 스위치는 적어 넣은 `topics`에도 걸린다.** `include_conversation`이 꺼진 채로 `topics`가
+`agent.text.`에 닿으면 — 그것 자체든, 그것을 덮는 `agent.`든, 그 안쪽의 `agent.text.delta`든
+— **설정 오류**다. 구독하는 것이 곧 로그에 넣는 것이므로 둘이 동시에 참일 수 없다. 접두사를
+좁히거나, `include_conversation = true`로 그럴 작정이었다고 말하면 된다. 스위치가 기본 목록만
+지키면 목록 한 줄로 우회되는 게이트이고, 그건 게이트가 아니다.
+
 **적어 넣은 것과 기본값은 다르게 다뤄진다.**
 
 | 무엇을 적었나 | 프로파일이 그것을 좁히면 |
@@ -193,6 +199,7 @@ api_key_env = "DEEPSEEK_API_KEY"
 | 아무것도 (기본 목록) | 좁혀진 채로 등록한다. 기본 목록은 plugin의 *선호*다 |
 | `topics = [...]` | **로드 실패.** 사라진 접두사를 이름으로 댄다 |
 | `include_conversation = true` | **로드 실패** — `agent.text.`를 안 주는 프로파일에서 |
+| `topics`가 `agent.text.`에 닿는데 `include_conversation`이 꺼져 있다 | 프로파일을 보기 전에 **설정 오류** |
 
 접두사의 meet은 합집합이라 좁은 프로파일 + `agent.text.`는 "권한 0"이 **아니라** "그것만
 사라짐"이 된다. 호스트의 guard는 빈 meet만 거절하므로 이 경우를 못 잡는다. 잡는 것은 plugin
@@ -215,6 +222,12 @@ RIVET_LOG_FORMAT=json rivet "explain this repo" 2>telemetry.jsonl
 `--jsonl`(stdout)과 telemetry(stderr)는 목적지가 다르므로 섞이지 않는다. 다만 telemetry는
 human 렌더러와 stderr을 **공유한다** — `→ read_file` 줄 사이에 로그 줄이 낀다. 위의
 리다이렉션이 답이다.
+
+`--tui`는 다르게 처리된다. TUI는 대체 화면(alternate screen)을 소유하고 ratatui는 자기
+버퍼에 대해 diff하므로, 프레임 위에 찍힌 로그 줄은 **아무도 다시 그려 주지 않는다** — 남은
+실행 내내 깨진 채다. 그래서 `--tui`이면서 stderr이 그 터미널일 때는 로그를 버린다. stderr을
+따로 돌린 `rivet --tui 2>run.log`는 운영자가 둘 다 원한다고 말한 것이고 부딪힐 것이 없으므로
+그대로 나간다.
 
 provider별 조합:
 
@@ -356,7 +369,7 @@ telemetry plugin이 켜져 있는데 아무것도 안 보이면 "구조화 로�
 |---|---|
 | `RIVET_CONFIG` | 설정 파일 경로 |
 | `api_key_env`가 가리키는 변수 | provider API 키. 기본 이름은 `OPENAI_API_KEY` |
-| `RUST_LOG` | 로그 필터. 기본 `warn,rivet_telemetry_log=info`, stderr로 나간다. 설정하면 통째로 이긴다 |
+| `RUST_LOG` | 로그 필터. 기본 `warn,rivet_telemetry_log=info`, stderr로 나간다. 설정하면 통째로 이긴다. `--tui` + 터미널 stderr에서는 목적지가 없어진다 (위) |
 | `RIVET_LOG_FORMAT` | `json`이면 로그가 줄 단위 JSON으로 나온다. 그 외 값은 사람이 읽는 형식 |
 | `RIVET_DUMP_REQUESTS` | 조립된 요청을 이 디렉터리에 덤프한다 (디버깅용) |
 

@@ -207,6 +207,35 @@ impl TopicScope {
     fn from_unsorted(items: Vec<String>) -> Option<Self> {
         Self::new(items).ok()
     }
+
+    /// Whether this scope carries `prefix` **whole**.
+    ///
+    /// Not "overlaps", and the difference is the whole point. A prefix `p` survives a meet
+    /// intact only if the scope holds something `p` itself starts with; anything *narrower*
+    /// than `p` keeps a slice of it and drops the rest. `agent.` against a scope of
+    /// `agent.request.`, `agent.run.` and `agent.turn.` overlaps three ways and carries
+    /// none of them whole — `agent.text.` is gone, the meet is non-empty, and so nothing
+    /// downstream of the meet can tell.
+    ///
+    /// Two callers turn on exactly that distinction: `GuardedRegistry`'s narrowing trace
+    /// and `rivet.telemetry-log`'s broken-promise check. They had a copy each, with a
+    /// paragraph of the same explanation apiece, until one of them was found asking about
+    /// overlap instead.
+    #[must_use]
+    pub fn covers_whole(&self, prefix: &str) -> bool {
+        covers_whole(&self.0, prefix)
+    }
+}
+
+/// [`TopicScope::covers_whole`] over a bare prefix list.
+///
+/// For a caller holding one before a scope exists — `rivet.telemetry-log` reads its list
+/// out of TOML and has to answer this question about it before the grant is consulted.
+#[must_use]
+pub fn covers_whole(prefixes: &[String], prefix: &str) -> bool {
+    prefixes
+        .iter()
+        .any(|held| prefix.starts_with(held.as_str()))
 }
 
 impl<'de> Deserialize<'de> for TopicScope {
@@ -354,6 +383,42 @@ impl Permission {
             _ => None,
         }
     }
+
+    /// Every [`Permission::EventsSubscribe`] in a grant, joined into one.
+    ///
+    /// Not "the first one". [`PermissionSet`]'s dedup folds only values that are *equal*
+    /// and [`PermissionSet::intersect`] pushes a result per meeting pair, so two can
+    /// genuinely survive into an effective grant. Taking the first quietly narrows or
+    /// widens depending on sort order; the plugin holds both, so the answer is their join.
+    /// `None` (every topic) absorbs everything, and [`TopicScope::new`] absorbs a prefix
+    /// another entry already covers, so the result stays an antichain.
+    ///
+    /// Returning `None` means the grant carries no `events_subscribe` at all — a different
+    /// answer from `Some(EventsSubscribe(None))`, which is "granted, and unscoped".
+    #[must_use]
+    pub fn join_events_subscribe(granted: &[Self]) -> Option<Self> {
+        let mut found = false;
+        let mut prefixes: Vec<String> = Vec::new();
+        for permission in granted {
+            let Self::EventsSubscribe(scope) = permission else {
+                continue;
+            };
+            found = true;
+            match scope {
+                // Unscoped: every topic, and nothing can narrow a join.
+                None => return Some(Self::EventsSubscribe(None)),
+                Some(topics) => prefixes.extend(topics.as_slice().iter().cloned()),
+            }
+        }
+        if !found {
+            return None;
+        }
+        // `found` is true and every scoped entry contributed at least one prefix, so this
+        // cannot be empty and the constructor cannot fail.
+        TopicScope::new(prefixes)
+            .ok()
+            .map(|topics| Self::EventsSubscribe(Some(topics)))
+    }
 }
 
 /// Whether a subtree string stays inside the workspace.
@@ -469,6 +534,85 @@ impl PermissionSet {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_scope_carries_a_prefix_whole_or_it_does_not_carry_it() {
+        let narrowed = TopicScope::new(
+            ["agent.request.", "agent.run.", "agent.turn.", "tool."]
+                .iter()
+                .map(|t| (*t).to_string()),
+        )
+        .unwrap();
+
+        // Overlaps three ways and carries none of them: `agent.text.` is missing, so a
+        // subscriber asking for `agent.` gets less than it asked for. This is the one
+        // distinction two call sites had a private copy of, and the copy that asked
+        // `held.starts_with(asked)` instead called this survival.
+        assert!(!narrowed.covers_whole("agent."));
+        // Exactly held, and narrower than something held: both survive a meet intact.
+        assert!(narrowed.covers_whole("tool."));
+        assert!(narrowed.covers_whole("tool.execute."));
+        // Not held at all.
+        assert!(!narrowed.covers_whole("job."));
+    }
+
+    #[test]
+    fn a_grant_with_two_subscribe_entries_joins_them() {
+        // `PermissionSet` dedups only equal values and `intersect` pushes a result per
+        // meeting pair, so two entries genuinely reach a plugin. Reading the first made the
+        // answer depend on sort order.
+        let granted = [
+            Permission::EventsSubscribe(Some(TopicScope::new(["agent.".to_string()]).unwrap())),
+            Permission::EventsSubscribe(Some(TopicScope::new(["tool.".to_string()]).unwrap())),
+        ];
+        let Some(Permission::EventsSubscribe(Some(joined))) =
+            Permission::join_events_subscribe(&granted)
+        else {
+            panic!("two scoped entries join into one scoped entry");
+        };
+        assert_eq!(joined.as_slice(), ["agent.", "tool."]);
+    }
+
+    #[test]
+    fn an_unscoped_entry_absorbs_the_rest_of_the_join() {
+        let granted = [
+            Permission::EventsSubscribe(Some(TopicScope::new(["agent.".to_string()]).unwrap())),
+            Permission::EventsSubscribe(None),
+        ];
+        assert_eq!(
+            Permission::join_events_subscribe(&granted),
+            Some(Permission::EventsSubscribe(None)),
+            "`None` is every topic, and nothing narrows a join"
+        );
+    }
+
+    #[test]
+    fn no_subscribe_entry_is_a_different_answer_from_an_unscoped_one() {
+        // "The grant does not carry it" and "the grant carries it without a scope" send an
+        // operator to two different places, so they must not collapse into one value.
+        assert_eq!(
+            Permission::join_events_subscribe(&[Permission::EventsPublish]),
+            None
+        );
+    }
+
+    #[test]
+    fn the_join_stays_an_antichain() {
+        // `TopicScope::new` absorbs a prefix another entry already covers, so a join cannot
+        // hand back a list where one entry shadows another.
+        let granted = [
+            Permission::EventsSubscribe(Some(
+                TopicScope::new(["agent.text.".to_string()]).unwrap(),
+            )),
+            Permission::EventsSubscribe(Some(TopicScope::new(["agent.".to_string()]).unwrap())),
+        ];
+        let Some(Permission::EventsSubscribe(Some(joined))) =
+            Permission::join_events_subscribe(&granted)
+        else {
+            panic!("scoped");
+        };
+        assert_eq!(joined.as_slice(), ["agent."]);
+    }
     use super::*;
 
     fn topics(list: &[&str]) -> TopicScope {

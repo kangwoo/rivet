@@ -619,6 +619,7 @@ plugin           # plugin.unloaded, 로드됐던 것에 대해 한 줄씩
 | 15 | raw mode가 Ctrl-C를 삼킨다 | **Phase 1의 보장을 조용히 깨는 자리다.** raw mode에서 SIGINT는 키 이벤트로 온다. TUI가 `Ctrl-C`를 `Intent::Cancel`로 매핑하고 호스트가 signal handler와 **같은 토큰**을 취소한다. 테스트로 못 박는다. |
 | 16 | telemetry 로그가 stderr을 막는다 | `tracing` sink 쓰기는 동기다. 파이프가 막히면 그 펌프가 선다. 루프는 안 선다(§5-1) — 서는 것은 그 구독자 하나이고, 대가는 §5-10이다. |
 | 17 | `--jsonl`과 telemetry plugin이 같이 켜진다 | 목적지가 다르다 — 전자는 stdout, 후자는 `tracing` sink(기본 stderr)이므로 스트림이 섞이지는 않는다. 다만 **human 렌더러와는 stderr을 공유한다** — `→ read_file` 줄 사이에 로그 줄이 낀다. 이건 opt-in 조합이고, 답은 `RIVET_LOG_FORMAT=json rivet ... 2>telemetry.jsonl`이다. `config.md`에 그렇게 적는다. |
+| 17b | **`--tui`와 telemetry plugin이 같이 켜진다** | 이 표가 놓쳤던 조합이다. 17의 답(리다이렉션)이 여기서는 안 통한다 — TUI가 소유한 것이 그 터미널이고, ratatui는 자기 버퍼에 대해 diff하므로 프레임 위에 찍힌 줄은 다시 그려지지 않는다. 기본 필터가 `rivet_telemetry_log=info`이므로 이벤트당 한 줄이고, plugin이 없어도 아무 `warn!` 하나면 같다. `--tui`이면서 stderr이 그 터미널이면 sink를 버린다. `2>run.log`로 돌린 stderr은 부딪힐 것이 없으므로 그대로 둔다 — 그래서 판단 기준이 stdout을 보는 `is_a_terminal`이 아니라 stderr이다. |
 | 18 | 이벤트 패밀리가 새로 생겨 좁힌 프로파일이 조용히 못 받는다 | `Event::one_of_each()` 위의 **와일드카드 없는 두 층 `match`**가 컴파일 타임에 잡는다 — 패밀리는 바깥 `match`, 변형은 안쪽 `match`. `&str` 키로 일반화하면 오늘 있는 컴파일 성질이 런타임으로 내려앉는다(§3.1). §11-10이 "silent"라고 적어 둔 구멍이다. |
 | 19 | 관측 사이드카가 설정 없이 켜진다 | `PluginSelection::All`은 카탈로그 전부이므로(`catalog.rs:145`) 카탈로그에 넣는 것만으로 기본 켜짐이 된다. `catalog::default_selection()`이 `All`의 뜻을 "에이전트를 돌리는 데 필요한 것"으로 좁힌다(§3.6). discover·`plugin list`·`enabled`로 이름 대기는 전부 그대로다. |
 
