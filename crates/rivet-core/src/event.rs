@@ -101,44 +101,19 @@ impl Event {
     /// wildcard-free `match`es, and a `match` needs values — hand out `&'static str` and
     /// today's compile error becomes tomorrow's runtime surprise.
     ///
-    /// # Why every one of these lists checks itself
-    ///
-    /// A list — a `vec![]` literal, or these five `extend` calls — is not
-    /// exhaustiveness-checked, so on its own it cannot notice something missing. The
-    /// argument that used to stand here was that the *sequence* covers it: add a variant, a
-    /// caller's `match` fails to compile, add the arm, and the arm's topic then fails the
-    /// caller's assertion. The middle step is where it breaks. Writing the arm makes
-    /// everything compile again, the variant is still absent from this list, and the
-    /// assertion never runs on it — so the answer the arm just recorded, including "yes,
-    /// the narrowed profiles are granted this topic", goes untested. Measured on the tree
-    /// before this: a new variant whose topic no profile grants, answered `true`, left the
-    /// whole suite green.
-    ///
-    /// So each list walks its own result through a wildcard-free `match` immediately below
-    /// it. Adding a variant is then a compile error *at the list it has to be added to*,
-    /// which is what the tripwire was always supposed to be.
+    /// Built by [`crate::one_of_each`], which is what keeps this list and the enum in step:
+    /// a family added to [`Event`] has no arm here, and the only syntax for an arm is the
+    /// one that gathers the family. Adding the arm *is* adding the `extend`. See the macro
+    /// for why a wildcard-free `match` beside the list was not enough on its own.
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
-        let mut all: Vec<Self> = AgentEvent::one_of_each()
-            .into_iter()
-            .map(Self::Agent)
-            .collect();
-        all.extend(ToolEvent::one_of_each().into_iter().map(Self::Tool));
-        all.extend(JobEvent::one_of_each().into_iter().map(Self::Job));
-        all.extend(PluginEvent::one_of_each().into_iter().map(Self::Plugin));
-        all.extend(RuntimeEvent::one_of_each().into_iter().map(Self::Runtime));
-        for event in &all {
-            // A whole new *family* is the one this layer catches, beside the `extend` that
-            // has to gather it.
-            match event {
-                Self::Agent(_)
-                | Self::Tool(_)
-                | Self::Job(_)
-                | Self::Plugin(_)
-                | Self::Runtime(_) => {}
-            }
-        }
-        all
+        crate::one_of_each!(extend Self {
+            Self::Agent(_) => AgentEvent::one_of_each().into_iter().map(Self::Agent),
+            Self::Tool(_) => ToolEvent::one_of_each().into_iter().map(Self::Tool),
+            Self::Job(_) => JobEvent::one_of_each().into_iter().map(Self::Job),
+            Self::Plugin(_) => PluginEvent::one_of_each().into_iter().map(Self::Plugin),
+            Self::Runtime(_) => RuntimeEvent::one_of_each().into_iter().map(Self::Runtime),
+        })
     }
 }
 
@@ -212,56 +187,41 @@ impl AgentEvent {
     /// Exists for `rivet-cli`'s check that every agent topic is either granted to the
     /// narrowed profiles or deliberately withheld: adding a variant has to break that
     /// test rather than quietly fall outside the grant. [`Event::one_of_each`] gathers
-    /// this and its four siblings so the same check covers every family, and explains why
-    /// each of these lists ends in a `match` over what it just built.
+    /// this and its four siblings so the same check covers every family, and
+    /// [`crate::one_of_each`] is what makes adding a variant here impossible to answer
+    /// without also sampling it.
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
         use crate::model::{StopReason, Usage};
-        let all = vec![
-            Self::RunStarted {
+        crate::one_of_each!(Self {
+            Self::RunStarted { .. } => Self::RunStarted {
                 agent_id: crate::id::AgentId::new(),
                 model: crate::model::ModelId::new("p/m").expect("valid"),
             },
-            Self::TurnStarted { turn: 1 },
-            Self::RequestStarted {
+            Self::TurnStarted { .. } => Self::TurnStarted { turn: 1 },
+            Self::RequestStarted { .. } => Self::RequestStarted {
                 model: crate::model::ModelId::new("p/m").expect("valid"),
                 input_tokens_estimate: 0,
             },
-            Self::TextDelta {
+            Self::TextDelta { .. } => Self::TextDelta {
                 text: String::new(),
             },
-            Self::RequestCompleted {
+            Self::RequestCompleted { .. } => Self::RequestCompleted {
                 usage: Usage::default(),
                 stop_reason: StopReason::EndTurn,
                 latency_ms: 0,
             },
-            Self::RequestFailed {
+            Self::RequestFailed { .. } => Self::RequestFailed {
                 error: String::new(),
                 will_retry: false,
                 attempt: 1,
             },
-            Self::TurnCompleted { turn: 1 },
-            Self::RunCompleted {
+            Self::TurnCompleted { .. } => Self::TurnCompleted { turn: 1 },
+            Self::RunCompleted { .. } => Self::RunCompleted {
                 turns: 1,
                 stop: crate::agent::StopReason::EndTurn,
             },
-        ];
-        for event in &all {
-            // No wildcard: a new variant fails to compile *here*, one line below the list
-            // it has to be added to. See [`Event::one_of_each`] for why the caller's own
-            // `match` is not enough.
-            match event {
-                Self::RunStarted { .. }
-                | Self::TurnStarted { .. }
-                | Self::RequestStarted { .. }
-                | Self::TextDelta { .. }
-                | Self::RequestCompleted { .. }
-                | Self::RequestFailed { .. }
-                | Self::TurnCompleted { .. }
-                | Self::RunCompleted { .. } => {}
-            }
-        }
-        all
+        })
     }
 }
 
@@ -324,61 +284,46 @@ impl ToolEvent {
         }
     }
 
-    /// One value per variant. See [`Event::one_of_each`].
+    /// One value per variant. See [`Event::one_of_each`] and [`crate::one_of_each`].
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
-        let all = vec![
-            Self::Requested {
+        crate::one_of_each!(Self {
+            Self::Requested { .. } => Self::Requested {
                 call_id: ToolCallId::new(),
                 name: "t".into(),
             },
-            Self::PolicyEvaluated {
+            Self::PolicyEvaluated { .. } => Self::PolicyEvaluated {
                 call_id: ToolCallId::new(),
                 decision: Box::new(PolicyDecision::allow()),
                 policy: "p".into(),
             },
-            Self::ApprovalRequested {
+            Self::ApprovalRequested { .. } => Self::ApprovalRequested {
                 call_id: ToolCallId::new(),
                 reason: String::new(),
             },
-            Self::ApprovalResolved {
+            Self::ApprovalResolved { .. } => Self::ApprovalResolved {
                 call_id: ToolCallId::new(),
                 approved: true,
             },
-            Self::Started {
+            Self::Started { .. } => Self::Started {
                 call_id: ToolCallId::new(),
                 name: "t".into(),
                 sandboxed: false,
             },
-            Self::Progress {
+            Self::Progress { .. } => Self::Progress {
                 call_id: ToolCallId::new(),
                 message: String::new(),
             },
-            Self::Completed {
+            Self::Completed { .. } => Self::Completed {
                 call_id: ToolCallId::new(),
                 is_error: false,
                 duration_ms: 0,
             },
-            Self::Blocked {
+            Self::Blocked { .. } => Self::Blocked {
                 call_id: ToolCallId::new(),
                 reason: String::new(),
             },
-        ];
-        for event in &all {
-            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
-            // fail to compile at the list, not only at the caller that reads it.
-            match event {
-                Self::Requested { .. }
-                | Self::PolicyEvaluated { .. }
-                | Self::ApprovalRequested { .. }
-                | Self::ApprovalResolved { .. }
-                | Self::Started { .. }
-                | Self::Progress { .. }
-                | Self::Completed { .. }
-                | Self::Blocked { .. } => {}
-            }
-        }
-        all
+        })
     }
 }
 
@@ -422,46 +367,34 @@ impl JobEvent {
         }
     }
 
-    /// One value per variant. See [`Event::one_of_each`].
+    /// One value per variant. See [`Event::one_of_each`] and [`crate::one_of_each`].
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
-        let all = vec![
-            Self::Created {
+        crate::one_of_each!(Self {
+            Self::Created { .. } => Self::Created {
                 job_id: JobId::new(),
                 goal: String::new(),
             },
-            Self::StateChanged {
+            Self::StateChanged { .. } => Self::StateChanged {
                 job_id: JobId::new(),
                 from: JobState::Pending,
                 to: JobState::Ready,
                 reason: String::new(),
             },
-            Self::RunAttached {
+            Self::RunAttached { .. } => Self::RunAttached {
                 job_id: JobId::new(),
                 run_id: RunId::new(),
                 attempt: 1,
             },
-            Self::ReviewRequested {
+            Self::ReviewRequested { .. } => Self::ReviewRequested {
                 job_id: JobId::new(),
                 reviewer: AgentId::new(),
             },
-            Self::ReviewCompleted {
+            Self::ReviewCompleted { .. } => Self::ReviewCompleted {
                 job_id: JobId::new(),
                 verdict: crate::job::ReviewVerdict::Approve,
             },
-        ];
-        for event in &all {
-            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
-            // fail to compile at the list, not only at the caller that reads it.
-            match event {
-                Self::Created { .. }
-                | Self::StateChanged { .. }
-                | Self::RunAttached { .. }
-                | Self::ReviewRequested { .. }
-                | Self::ReviewCompleted { .. } => {}
-            }
-        }
-        all
+        })
     }
 }
 
@@ -495,7 +428,7 @@ impl PluginEvent {
         }
     }
 
-    /// One value per variant. See [`Event::one_of_each`].
+    /// One value per variant. See [`Event::one_of_each`] and [`crate::one_of_each`].
     ///
     /// # Panics
     /// Never: `p.sample` is a valid plugin id and `every_sample_has_a_distinct_topic`
@@ -503,31 +436,20 @@ impl PluginEvent {
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
         let plugin_id = PluginId::new("p.sample").expect("a literal plugin id is valid");
-        let all = vec![
-            Self::Discovered {
+        crate::one_of_each!(Self {
+            Self::Discovered { .. } => Self::Discovered {
                 plugin_id: plugin_id.clone(),
             },
-            Self::Loaded {
+            Self::Loaded { .. } => Self::Loaded {
                 plugin_id: plugin_id.clone(),
                 capabilities: Vec::new(),
             },
-            Self::LoadFailed {
+            Self::LoadFailed { .. } => Self::LoadFailed {
                 plugin_id: plugin_id.clone(),
                 error: String::new(),
             },
-            Self::Unloaded { plugin_id },
-        ];
-        for event in &all {
-            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
-            // fail to compile at the list, not only at the caller that reads it.
-            match event {
-                Self::Discovered { .. }
-                | Self::Loaded { .. }
-                | Self::LoadFailed { .. }
-                | Self::Unloaded { .. } => {}
-            }
-        }
-        all
+            Self::Unloaded { .. } => Self::Unloaded { plugin_id },
+        })
     }
 }
 
@@ -559,31 +481,21 @@ impl RuntimeEvent {
         }
     }
 
-    /// One value per variant. See [`Event::one_of_each`].
+    /// One value per variant. See [`Event::one_of_each`] and [`crate::one_of_each`].
     #[must_use]
     pub fn one_of_each() -> Vec<Self> {
-        let all = vec![
-            Self::Started {
+        crate::one_of_each!(Self {
+            Self::Started { .. } => Self::Started {
                 version: String::new(),
             },
-            Self::ShuttingDown {
+            Self::ShuttingDown { .. } => Self::ShuttingDown {
                 reason: String::new(),
             },
-            Self::SubscriberLagged {
+            Self::SubscriberLagged { .. } => Self::SubscriberLagged {
                 subscriber: String::new(),
                 dropped: 0,
             },
-        ];
-        for event in &all {
-            // No wildcard, for the reason on [`Event::one_of_each`]: a new variant has to
-            // fail to compile at the list, not only at the caller that reads it.
-            match event {
-                Self::Started { .. }
-                | Self::ShuttingDown { .. }
-                | Self::SubscriberLagged { .. } => {}
-            }
-        }
-        all
+        })
     }
 }
 
@@ -644,10 +556,10 @@ mod tests {
         assert!(!topic_matches(&filters, "agent.run.started"));
     }
 
-    /// `one_of_each` is a literal list, so the failure it *can* have is a copy-paste
-    /// duplicate — two entries for one variant, and a variant with none. The tripwire for
-    /// a missing variant lives in the wildcard-free `match`es that consume this; see
-    /// [`Event::one_of_each`].
+    /// [`crate::one_of_each`] makes a *missing* variant a compile error, so the failure
+    /// left to catch at run time is a copy-paste one: an arm whose sample is some other
+    /// variant, which shows up here as two samples sharing a topic and one variant with
+    /// none.
     #[test]
     fn every_sample_has_a_distinct_topic() {
         let samples = Event::one_of_each();
