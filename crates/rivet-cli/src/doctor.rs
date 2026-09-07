@@ -91,7 +91,10 @@ pub async fn run(config: &Config) -> rivet_core::Result<bool> {
     }
 
     println!("\nplugins");
-    let host = catalog::load(config).await?;
+    // `doctor` makes its own bus and attaches nothing to it. It diagnoses a runtime rather
+    // than starting one, so it does not publish `runtime.started` -- a topic that meant
+    // "a run began" and also "somebody ran doctor" would mean neither.
+    let host = catalog::load(config, rivet_runtime::BroadcastBus::new()).await?;
     healthy &= report_plugins(config, &host);
     host.shutdown();
 

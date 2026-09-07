@@ -21,6 +21,7 @@ rivet-plugin.workspace = true
 rivet-model-openai.workspace = true
 rivet-tool-filesystem.workspace = true
 rivet-context-builtin.workspace = true
+rivet-telemetry-log.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 futures-util.workspace = true

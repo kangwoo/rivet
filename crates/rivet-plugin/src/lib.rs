@@ -24,14 +24,18 @@
 //! - **No `rivet-core` changes.** Every contract used here already exists and is already
 //!   tested: [`rivet_core::plugin::PluginManifest`],
 //!   [`rivet_core::capability::CapabilityVersion::accepts`],
-//!   [`rivet_core::capability::PermissionSet::intersect`].
+//!   [`rivet_core::capability::PermissionSet::intersect`]. Phase 3 kept that rule: the
+//!   topic filter in [`subscriber`] is [`rivet_core::capability::Permission::meet`] run a
+//!   second time, at delivery, rather than a second rule that could drift from it.
 
 pub mod guard;
 pub mod loader;
 pub mod manifest;
 pub mod source;
+pub mod subscriber;
 
 pub use guard::GuardedRegistry;
 pub use loader::{LoadReport, PluginLoader, PluginRecord};
 pub use manifest::{parse, parse_from};
 pub use source::{Construct, Origin, PluginSource};
+pub use subscriber::{Grant, ScopedSubscriber, effective_topics};

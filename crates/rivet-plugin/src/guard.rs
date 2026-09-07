@@ -18,6 +18,13 @@
 //! It wraps [`ScopedRegistry`] rather than living inside it: the registry does not see the
 //! manifest, and adding a declared-kinds parameter to `Registry::scoped` would change a
 //! Phase 0 contract for every embedder.
+//!
+//! Phase 3 gave it a second thing to enforce, for the same reason and in the same place.
+//! `register_subscriber` now also checks the *grant*: `events_subscribe` has to be there,
+//! and what the subscriber asked to see has to overlap it. The grant lives here because
+//! `ctx.permissions` already does — putting it on `Registry::scoped` would change that
+//! Phase 0 contract for every embedder, which is the argument Phase 2 already made about
+//! declared kinds. See [`crate::subscriber`].
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -38,12 +45,16 @@ use rivet_core::tool::Tool;
 use rivet_runtime::registry::ScopedRegistry;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
+use crate::subscriber::{Grant, ScopedSubscriber, effective_topics};
+
 /// A [`ScopedRegistry`] that refuses undeclared slots and remembers what was registered.
 #[derive(Debug)]
 pub struct GuardedRegistry {
     inner: ScopedRegistry,
     plugin_id: PluginId,
     declared: Vec<CapabilityKind>,
+    /// What the loader decided this plugin may see. Read only by `register_subscriber`.
+    grant: Grant,
     observed: Mutex<Vec<String>>,
     /// `true` once the loader has closed the registration window.
     ///
@@ -57,12 +68,23 @@ pub struct GuardedRegistry {
 }
 
 impl GuardedRegistry {
+    /// # Note for embedders
+    /// `grant` is what the *loader* computed, not what the manifest asked for.
+    /// [`Grant::default`] is empty in both fields, so a caller that forgets it does not
+    /// quietly permit every subscriber — every subscriber is refused with "the manifest
+    /// never asked". The breaking direction is the closed one.
     #[must_use]
-    pub fn new(inner: ScopedRegistry, plugin_id: PluginId, declared: Vec<CapabilityKind>) -> Self {
+    pub fn new(
+        inner: ScopedRegistry,
+        plugin_id: PluginId,
+        declared: Vec<CapabilityKind>,
+        grant: Grant,
+    ) -> Self {
         Self {
             inner,
             plugin_id,
             declared,
+            grant,
             observed: Mutex::new(Vec::new()),
             sealed: RwLock::new(false),
         }
@@ -257,13 +279,53 @@ impl PluginRegistry for GuardedRegistry {
         Ok(())
     }
 
+    /// The one registration that consults the grant as well as the declared slot.
+    ///
+    /// Two checks, and they are not the same question. The slot (`event_subscriber`) says
+    /// *what this plugin fills*; `events_subscribe` says *what it may see*. A manifest can
+    /// get either one wrong on its own, so the messages stay separate.
+    ///
+    /// The subscriber is wrapped rather than corrected in place: its `topics()` is its own
+    /// preference and it keeps returning whatever it likes, but what the pump reads is the
+    /// wrapper's list, fixed here.
     async fn register_subscriber(
         &self,
         subscriber: Arc<dyn EventSubscriber>,
     ) -> rivet_core::Result<()> {
         let window = self.open(CapabilityKind::EventSubscriber).await?;
         let name = subscriber.name().to_string();
-        self.inner.register_subscriber(subscriber).await?;
+        let wanted = subscriber.topics();
+        let topics = effective_topics(&self.grant, &wanted)
+            .map_err(|error| Error::plugin(format!("`{}`: {}", self.plugin_id, error.message())))?;
+        // Narrowing is allowed and is not an error -- a subscriber's own list is a
+        // preference, and the grant is what it is. But this Phase is about observability,
+        // so a grant that silently removes part of what a subscriber asked for still
+        // leaves a line behind.
+        if let Some(effective) = &topics {
+            // Compare by coverage, not by list: `TopicScope` sorts and absorbs, so the
+            // same set comes back in a different order and with covered entries folded
+            // away. Only a prefix the effective scope does not admit at all was lost.
+            let lost: Vec<&String> = wanted
+                .iter()
+                .filter(|asked| {
+                    !effective.as_slice().iter().any(|held| {
+                        asked.starts_with(held.as_str()) || held.starts_with(asked.as_str())
+                    })
+                })
+                .collect();
+            if !lost.is_empty() {
+                tracing::debug!(
+                    plugin = %self.plugin_id,
+                    subscriber = %name,
+                    lost = ?lost,
+                    receiving = ?effective.as_slice(),
+                    "the grant narrowed a subscriber's topics"
+                );
+            }
+        }
+        self.inner
+            .register_subscriber(Arc::new(ScopedSubscriber::new(subscriber, topics)))
+            .await?;
         self.record("subscriber", &name);
         drop(window);
         Ok(())

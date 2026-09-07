@@ -13,19 +13,25 @@ use rivet_core::session::{SessionEvent, SessionState, SessionStore};
 use rivet_runtime::agent_loop::{AgentLoop, RunConfig};
 use rivet_runtime::context::ContextAssembler;
 use rivet_runtime::jitter::FullJitter;
+use rivet_runtime::{BroadcastBus, Drained};
 use rivet_session::JsonlSessionStore;
+use rivet_tui::{Intent, Tui};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{self, Host};
 use crate::config::Config;
-use crate::render::{human::HumanRenderer, jsonl::JsonlRenderer};
+use crate::render::{self, Observers};
 
-/// How output is presented.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Output {
-    Human,
-    Jsonl,
-}
+pub use crate::render::Output;
+
+/// How long the host waits for its own renderer to finish the stream.
+///
+/// Invented, and safe to invent: unlike the missing `Plugin::load` deadline
+/// (`docs/architecture.md` §11-15), this is a budget the host puts on *its own output*,
+/// not on a plugin's contract. The cost of getting it wrong is one warning line saying the
+/// tail was cut — not a `FAILED` record for something that was merely slow.
+const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Start a new session and run one prompt.
 ///
@@ -39,7 +45,11 @@ pub async fn start(
     // Before a session exists: an empty session left behind by a missing key is noise in
     // `rivet session list` forever.
     config.check_credentials()?;
-    let mut host = catalog::load(config).await?;
+    // The bus, the observer and `runtime.started` all come before `catalog::load`, so the
+    // whole plugin lifecycle happens with somebody listening. Today it happens in an empty
+    // room and `--jsonl` never carries a `plugin.*` line at all.
+    let mut watching = observe(output)?;
+    let mut host = catalog::load(config, watching.bus.clone()).await?;
     let store = Arc::new(JsonlSessionStore::new(&config.sessions_dir));
 
     let session_id = SessionId::new();
@@ -63,8 +73,61 @@ pub async fn start(
         state,
         Some(Message::user(prompt)),
         output,
+        &mut watching,
     )
     .await
+}
+
+/// Everything `observe` sets up, before a single plugin is constructed.
+#[derive(Debug)]
+struct Watching {
+    bus: BroadcastBus,
+    observers: Observers,
+    /// The screen, when `--tui` is on. It is both the subscriber and the thing the render
+    /// loop draws, so the two halves have to be the same value.
+    tui: Option<Arc<Tui>>,
+    intents: Option<mpsc::Receiver<Intent>>,
+}
+
+/// Make the bus, attach the host's renderer, and announce the runtime — in that order.
+///
+/// The order *is* the point. An observer attached after `catalog::load` misses
+/// `runtime.started` and every `plugin.*` event, which is most of what an operator reads
+/// the stream for.
+///
+/// # Errors
+/// `--tui` with stdout on a pipe.
+fn observe(output: Output) -> rivet_core::Result<Watching> {
+    if output == Output::Tui && !rivet_tui::is_a_terminal() {
+        // Before raw mode, not after: raw mode on a pipe leaves no terminal to put back.
+        return Err(Error::invalid_argument(
+            "`--tui` needs a terminal; use `--jsonl` when stdout is a pipe",
+        ));
+    }
+
+    let bus = BroadcastBus::new();
+    let (tui, intents) = match output {
+        Output::Tui => {
+            let (tui, intents) = Tui::new();
+            (Some(Arc::new(tui)), Some(intents))
+        }
+        Output::Human | Output::Jsonl => (None, None),
+    };
+    let observers = render::attach(
+        &bus,
+        output,
+        tui.clone().map(|tui| tui as Arc<dyn EventSubscriber>),
+    );
+    // `runtime.started` is the host's to publish, and `rivet run`/`rivet resume` are the
+    // only commands that start a runtime -- `doctor` diagnoses one, which is not the same
+    // thing and would blur what the topic means.
+    rivet_runtime::lifecycle::started(&bus, env!("CARGO_PKG_VERSION"));
+    Ok(Watching {
+        bus,
+        observers,
+        tui,
+        intents,
+    })
 }
 
 /// Continue an interrupted session.
@@ -99,8 +162,19 @@ pub async fn resume(
             Ok(None)
         }
         rivet_runtime::session_recovery::ResumePlan::Continue => {
-            let mut host = catalog::load(config).await?;
-            let summary = drive(config, &mut host, store, session_id, state, None, output).await?;
+            let mut watching = observe(output)?;
+            let mut host = catalog::load(config, watching.bus.clone()).await?;
+            let summary = drive(
+                config,
+                &mut host,
+                store,
+                session_id,
+                state,
+                None,
+                output,
+                &mut watching,
+            )
+            .await?;
             Ok(Some(summary))
         }
     }
@@ -132,7 +206,12 @@ fn check_workspace(
     )))
 }
 
-/// Wire up the renderers, the signal handler and the loop, then run.
+/// Wire up the signal handler and the loop, then run.
+///
+/// The renderers are already attached — [`observe`] did that before any plugin existed —
+/// so what happens here is the run itself, the shutdown announcement, and finishing the
+/// stream.
+#[allow(clippy::too_many_arguments)] // Every one is a distinct thing the run needs.
 async fn drive(
     config: &Config,
     host: &mut Host,
@@ -141,13 +220,8 @@ async fn drive(
     state: SessionState,
     input: Option<Message>,
     output: Output,
+    watching: &mut Watching,
 ) -> rivet_core::Result<RunSummary> {
-    let subscriber: Arc<dyn EventSubscriber> = match output {
-        Output::Human => Arc::new(HumanRenderer::new()),
-        Output::Jsonl => Arc::new(JsonlRenderer::new()),
-    };
-    let render_task = host.bus.attach(subscriber);
-
     let agent = agent_spec(config);
     let providers = host.registry.context_providers().await;
     // Phase 1's agent never names providers, so this takes the "all of them" branch. The
@@ -160,7 +234,7 @@ async fn drive(
     cfg.profile = config.profile.name().to_string();
     cfg.unattended = config.unattended;
     cfg.permissions = config.profile.permissions();
-    cfg.cancel = cancel;
+    cfg.cancel = cancel.clone();
 
     let agent_loop = AgentLoop::new(
         host.registry.clone(),
@@ -171,23 +245,156 @@ async fn drive(
         Arc::new(FullJitter::for_run(cfg.run_id)),
     );
 
+    // The screen, if there is one. `TerminalGuard` owns raw mode for as long as it lives,
+    // so the run happens inside its scope and the summary is printed after `restore`.
+    let mut screen = match (&watching.tui, watching.intents.take()) {
+        (Some(tui), Some(intents)) => Some(Screen::start(tui, intents, &cancel)?),
+        _ => None,
+    };
+
     let summary = agent_loop.run(cfg, state, input).await;
 
     signals.abort();
+    if let Some(screen) = screen.take() {
+        screen.stop().await;
+    }
     host.shutdown();
-    // Give the renderer a moment to drain before the process exits.
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    render_task.abort();
+    // `runtime.shutting_down` before the unloads it explains, so a plugin's own subscriber
+    // sees the reason it is about to be detached. The `plugin.unloaded` lines that follow
+    // are the ones it necessarily misses -- which is what DoD 5 asks for.
+    rivet_runtime::lifecycle::shutting_down(&host.bus, "run finished");
     // `Plugin::unload` finally has a caller on the normal path: a plugin that started
     // something of its own gets told the run is over, rather than being left to process
     // exit.
     host.loader.unload_all().await;
+
+    // Everything is published. Hand it over -- rather than sleeping 20 ms and aborting,
+    // which made the tail of the stream a matter of scheduler luck.
+    let observers = std::mem::take(&mut watching.observers);
+    if let Drained::Truncated { budget_ms } = observers.drain_within(DRAIN_BUDGET).await {
+        eprintln!(
+            "rivet: the event stream was cut off after {budget_ms}ms;              its last lines are missing"
+        );
+    }
 
     let summary = summary?;
     if output == Output::Human {
         report(&summary);
     }
     Ok(summary)
+}
+
+/// The TUI while it is on screen: raw mode, the render loop, and the intent pump.
+///
+/// A value rather than three locals so `drive` has one thing to stop, and so the terminal
+/// is put back on every path out — including the error one.
+#[derive(Debug)]
+struct Screen {
+    render: tokio::task::JoinHandle<()>,
+    intents: tokio::task::JoinHandle<()>,
+    /// Ends the render loop. A child of nothing: cancelling the *run* should not
+    /// immediately blank the screen, because the run still has its shutdown to do.
+    stop: CancellationToken,
+}
+
+impl Screen {
+    /// Enter raw mode and start drawing.
+    ///
+    /// # Errors
+    /// Whatever the terminal reports on entering raw mode.
+    fn start(
+        tui: &Arc<Tui>,
+        mut intents: mpsc::Receiver<Intent>,
+        run_cancel: &CancellationToken,
+    ) -> rivet_core::Result<Self> {
+        let mut guard = rivet_tui::TerminalGuard::enter().map_err(|e| {
+            Error::internal("could not put the terminal into raw mode").with_cause(e)
+        })?;
+        let stop = CancellationToken::new();
+
+        let render = tokio::spawn({
+            let (tui, stop) = (tui.clone(), stop.clone());
+            async move {
+                let _ = tui.render_loop(guard.terminal(), stop).await;
+                // Explicit, not just `Drop`: the summary is printed on the real screen
+                // after this, and the forced-exit path below runs no destructors at all.
+                guard.restore();
+            }
+        });
+
+        let intents = tokio::spawn({
+            let run_cancel = run_cancel.clone();
+            let stop = stop.clone();
+            async move {
+                let mut asked_to_cancel = false;
+                while let Some(intent) = intents.recv().await {
+                    match Reaction::to(intent, &mut asked_to_cancel) {
+                        Reaction::StopDrawing => {
+                            stop.cancel();
+                            return;
+                        }
+                        Reaction::CancelTheRun => run_cancel.cancel(),
+                        Reaction::ForceExit => {
+                            // `process::exit` runs no destructors, so the terminal is put
+                            // back here rather than left to `TerminalGuard::drop`.
+                            rivet_tui::terminal::restore();
+                            eprintln!(
+                                "forced; the session log may end mid-turn and will be \
+                                 repaired on resume"
+                            );
+                            std::process::exit(crate::exit::CANCELLED);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            render,
+            intents,
+            stop,
+        })
+    }
+
+    /// Put the terminal back, then let the tasks go.
+    #[allow(clippy::future_not_send)] // Runs on the same task that built it.
+    async fn stop(self) {
+        self.stop.cancel();
+        // Awaited rather than aborted: the render task restores the terminal on its way
+        // out, and aborting it would leave the shell in raw mode.
+        let _ = self.render.await;
+        self.intents.abort();
+    }
+}
+
+/// What the host does about one [`Intent`].
+///
+/// A value rather than three inline branches so the *second* Ctrl-C is testable. In raw
+/// mode neither interrupt reaches `signals.rs` — SIGINT arrives as a key — so without this
+/// the two-step guarantee Phase 1 made ("the first asks the run to stop and lets it write
+/// its log; the second gives up on that") would be quietly half true inside `--tui`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reaction {
+    /// Leave the UI; the run carries on to its shutdown.
+    StopDrawing,
+    /// Ask the run to stop, within its cancellation budget.
+    CancelTheRun,
+    /// Give up on the budget. The log may end mid-turn and `resume` repairs it.
+    ForceExit,
+}
+
+impl Reaction {
+    /// `asked` carries whether a cancel has already been sent, and is updated here.
+    fn to(intent: Intent, asked: &mut bool) -> Self {
+        match intent {
+            Intent::Quit => Self::StopDrawing,
+            Intent::Cancel if *asked => Self::ForceExit,
+            Intent::Cancel => {
+                *asked = true;
+                Self::CancelTheRun
+            }
+        }
+    }
 }
 
 /// The agent this configuration describes.
@@ -211,5 +418,37 @@ fn report(summary: &RunSummary) {
     );
     if let StopReason::Error { message } = &summary.stop {
         eprintln!("  ! {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The second Ctrl-C, which raw mode takes away from `signals.rs`.
+    #[test]
+    fn a_second_cancel_intent_forces_the_exit() {
+        let mut asked = false;
+        assert_eq!(
+            Reaction::to(Intent::Cancel, &mut asked),
+            Reaction::CancelTheRun
+        );
+        assert!(asked);
+        assert_eq!(
+            Reaction::to(Intent::Cancel, &mut asked),
+            Reaction::ForceExit
+        );
+    }
+
+    #[test]
+    fn quitting_leaves_the_ui_without_stopping_the_run() {
+        // `q` is "stop showing me this", not "abandon the run". The run still gets to
+        // publish `runtime.shutting_down` and unload its plugins.
+        let mut asked = false;
+        assert_eq!(
+            Reaction::to(Intent::Quit, &mut asked),
+            Reaction::StopDrawing
+        );
+        assert!(!asked, "quitting is not a cancel");
     }
 }

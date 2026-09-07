@@ -44,6 +44,104 @@ pub enum After {
     SucceedAfterArmingALateRegistration,
     /// Register a tool from `unload`, after the loader's `unregister_all` has run.
     RegisterFromUnload,
+    /// Register one [`Sink`] as an event subscriber, then succeed. Phase 3's shape.
+    RegisterSubscriber,
+    /// Never return from `load`. The shape `architecture.md` §11-15 names: a plugin
+    /// waiting inside `load` for a backend it cannot reach.
+    HangForever,
+}
+
+/// What a registered [`Sink`] did, watched from outside the `Arc` that holds it.
+///
+/// Both fields outlive the sink on purpose. A test that held the sink itself could never
+/// see it dropped, and "the subscriber was dropped" is a different claim from "delivery
+/// stopped" — the one `DoD` 5 actually makes.
+#[derive(Clone, Debug, Default)]
+pub struct SinkWatch {
+    seen: Arc<Mutex<Vec<String>>>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl SinkWatch {
+    /// Topics the sink received, in order.
+    pub fn seen(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether the last `Arc` holding the sink has gone.
+    pub fn dropped(&self) -> bool {
+        self.dropped.load(Ordering::SeqCst)
+    }
+
+    /// Wait for the sink to see at least `n` events, or give up.
+    pub async fn wait_for(&self, n: usize) -> bool {
+        for _ in 0..200 {
+            if self.seen().len() >= n {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        false
+    }
+
+    /// Wait for the sink itself to be dropped, or give up.
+    pub async fn wait_for_drop(&self) -> bool {
+        for _ in 0..200 {
+            if self.dropped() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        false
+    }
+}
+
+/// An `EventSubscriber` that records what it was given and reports its own death.
+#[derive(Debug)]
+pub struct Sink {
+    name: String,
+    topics: Vec<String>,
+    watch: SinkWatch,
+}
+
+impl Sink {
+    /// A sink not attached to any plugin, for testing the wrapper directly.
+    #[must_use]
+    pub fn probe(name: &str, topics: Vec<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            topics,
+            watch: SinkWatch::default(),
+        }
+    }
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        self.watch.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl rivet_core::event::EventSubscriber for Sink {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn topics(&self) -> Vec<String> {
+        self.topics.clone()
+    }
+
+    async fn on_event(&self, envelope: &rivet_core::event::EventEnvelope) {
+        self.watch
+            .seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(envelope.topic().to_string());
+    }
 }
 
 /// One plugin's script, and what it recorded.
@@ -51,6 +149,10 @@ pub enum After {
 pub struct Spy {
     pub tools: Vec<String>,
     pub after: After,
+    /// The name and topic preference of the subscriber [`After::RegisterSubscriber`]
+    /// registers, and the watch on it.
+    pub subscriber: Option<(String, Vec<String>)>,
+    pub watch: SinkWatch,
     /// Set the moment `load` is entered, so a test can prove `load` never ran at all.
     pub entered: AtomicBool,
     pub unloads: AtomicUsize,
@@ -91,14 +193,23 @@ static SCRIPTS: LazyLock<Mutex<HashMap<String, Arc<Spy>>>> =
 
 /// Register what the plugin with this id should do, and get the handle that watches it.
 pub fn plan(id: &str, tools: &[&str], after: After) -> Arc<Spy> {
-    let spy = Arc::new(Spy {
-        tools: tools.iter().map(|t| (*t).to_string()).collect(),
-        after,
-        entered: AtomicBool::new(false),
-        unloads: AtomicUsize::new(0),
-        token: Mutex::new(None),
-        late: Mutex::new(None),
-    });
+    plan_spy(
+        id,
+        Spy {
+            tools: tools.iter().map(|t| (*t).to_string()).collect(),
+            after,
+            subscriber: None,
+            watch: SinkWatch::default(),
+            entered: AtomicBool::new(false),
+            unloads: AtomicUsize::new(0),
+            token: Mutex::new(None),
+            late: Mutex::new(None),
+        },
+    )
+}
+
+fn plan_spy(id: &str, spy: Spy) -> Arc<Spy> {
+    let spy = Arc::new(spy);
     SCRIPTS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -153,6 +264,59 @@ pub fn tool_source(
 ) -> PluginSource {
     plan(id, tools, after);
     source(crate_name, manifest_toml(id, "\"tool\"", ""))
+}
+
+/// A plugin that declares `event_subscriber` and registers one [`Sink`] named `sink`.
+///
+/// `wants` is the subscriber's own `topics()` — empty is "no preference". `permissions` is
+/// appended to the manifest verbatim, so a test can give it `events_subscribe` with any
+/// scope, twice, or not at all.
+pub fn subscriber_source(
+    crate_name: &'static str,
+    id: &str,
+    wants: &[&str],
+    permissions: &str,
+) -> (PluginSource, SinkWatch) {
+    let watch = SinkWatch::default();
+    plan_spy(
+        id,
+        Spy {
+            tools: Vec::new(),
+            after: After::RegisterSubscriber,
+            subscriber: Some((
+                "sink".to_string(),
+                wants.iter().map(|w| (*w).to_string()).collect(),
+            )),
+            watch: watch.clone(),
+            entered: AtomicBool::new(false),
+            unloads: AtomicUsize::new(0),
+            token: Mutex::new(None),
+            late: Mutex::new(None),
+        },
+    );
+    (
+        source(
+            crate_name,
+            manifest_toml(id, "\"event_subscriber\"", permissions),
+        ),
+        watch,
+    )
+}
+
+/// `[[permissions]] events_subscribe`, with an optional scope.
+#[must_use]
+pub fn events_subscribe(scope: Option<&[&str]>) -> String {
+    match scope {
+        None => "\n[[permissions]]\npermission = \"events_subscribe\"\n".to_string(),
+        Some(prefixes) => {
+            let list = prefixes
+                .iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("\n[[permissions]]\npermission = \"events_subscribe\"\nscope = [{list}]\n")
+        }
+    }
 }
 
 pub fn id(raw: &str) -> PluginId {
@@ -314,6 +478,26 @@ impl Plugin for ScriptedPlugin {
             }
             After::SucceedAfterArmingALateRegistration => {
                 arm_late_registration(&ctx, &self.spy);
+                Ok(PluginHandle::new(registered))
+            }
+            After::HangForever => {
+                std::future::pending::<()>().await;
+                unreachable!("a hanging load never returns")
+            }
+            After::RegisterSubscriber => {
+                let (name, topics) = self
+                    .spy
+                    .subscriber
+                    .clone()
+                    .expect("`RegisterSubscriber` needs a planned subscriber");
+                ctx.registry
+                    .register_subscriber(Arc::new(Sink {
+                        name: name.clone(),
+                        topics,
+                        watch: self.spy.watch.clone(),
+                    }))
+                    .await?;
+                registered.push(format!("subscriber:{name}"));
                 Ok(PluginHandle::new(registered))
             }
         }

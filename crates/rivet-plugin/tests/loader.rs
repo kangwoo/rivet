@@ -746,3 +746,73 @@ async fn the_lifecycle_is_published_on_the_bus() {
         assert!(seen.iter().any(|t| t == topic), "{topic} missing: {seen:?}");
     }
 }
+
+/// The one thing Phase 3 gets for free from the deadline it did **not** add.
+///
+/// `docs/architecture.md` §11-15 records that nothing puts a timeout on `Plugin::load`, and
+/// Phase 3 does not invent one — the open question there is what to *record* on timeout,
+/// which is Phase 6's call. What Phase 3 does change is that the host now attaches its
+/// observer and publishes `runtime.started` *before* loading, so a hung load stops being
+/// invisible: it is a stream with `runtime.started` and that plugin's `plugin.discovered`,
+/// and neither `plugin.loaded` nor `plugin.load.failed` after it.
+///
+/// That is a diagnostic, not a deadline, and this test says exactly that much.
+#[tokio::test]
+async fn a_load_that_hangs_shows_up_as_a_discovered_plugin_that_never_loaded() {
+    use rivet_core::event::EventSubscriber;
+    use std::sync::{Mutex, PoisonError};
+
+    #[derive(Debug, Default)]
+    struct Topics(Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl EventSubscriber for Topics {
+        fn name(&self) -> &'static str {
+            "topics"
+        }
+
+        async fn on_event(&self, envelope: &rivet_core::event::EventEnvelope) {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(envelope.topic().to_string());
+        }
+    }
+
+    support::plan("test.hangs", &[], After::HangForever);
+    let source = support::source(
+        "hangs",
+        support::manifest_toml("test.hangs", "\"tool\"", ""),
+    );
+    let (mut loader, _registry, bus) = loader(no_grant());
+
+    let seen = Arc::new(Topics::default());
+    let observer = bus.observe(seen.clone());
+    // The host's order: announce, then discover, then load.
+    rivet_runtime::lifecycle::started(&bus, "0.1.0");
+    loader.discover(&[source]).expect("discover");
+    loader.validate();
+
+    // The load never returns. The point is what the stream says while it does not.
+    let hung = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        loader.load(&id("test.hangs"), serde_json::Value::Null),
+    )
+    .await;
+    assert!(hung.is_err(), "the scripted plugin is supposed to hang");
+
+    observer
+        .drain_within(std::time::Duration::from_secs(2))
+        .await;
+    let topics = seen
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        topics,
+        ["runtime.started", "plugin.discovered"],
+        "a hung load is a stream that starts and then stops saying anything about that \
+         plugin -- which is a diagnosis, not a deadline"
+    );
+}

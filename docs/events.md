@@ -157,10 +157,23 @@ plugin.loaded                  plugin_id, capabilities
 plugin.load.failed             plugin_id, error
 plugin.unloaded                plugin_id
 
-runtime.started                version
-runtime.shutting_down          reason
+runtime.started                version                    ← 호스트가 발행
+runtime.shutting_down          reason                     ← 호스트가 발행
 runtime.subscriber.lagged      subscriber, dropped
 ```
+
+`runtime.started`와 `runtime.shutting_down`은 **호스트의 것**이다: 런타임을 시작한 쪽만
+언제 시작했는지 알고, 정리하는 쪽만 왜 내리는지 안다. `rivet_runtime::lifecycle`의 두
+함수가 그것을 발행하고, 순서가 계약이다 — `started`는 plugin discover **전에**,
+`shutting_down`은 unload **전에**. 그래서 언로드되는 plugin의 구독자는
+`runtime.shutting_down`까지는 보고 그 뒤의 `plugin.unloaded`는 못 본다.
+
+**어느 것이 실제로 발행되는가.** 28개 중 20개는 이 트리에 발행 지점이 있고, 8개는 아직
+없다 — `tool.policy.evaluated` · `tool.approval.requested` · `tool.approval.resolved`는
+Phase 4, `job.*` 다섯은 Phase 5다. 그 분류를 코드 주석이 아니라 테스트가 붙든다:
+`every_bus_topic_is_claimed`(`rivet-runtime/tests/event_flow.rs`)이 `Event::one_of_each()`를
+**와일드카드 없는 두 층 `match`**로 훑어 각 변형을 "발행됨" 또는 "Phase N 대기"로 분류하고
+두 기대 목록과 대조한다. 토픽이 새로 생기면 그 `match`가 컴파일에 실패한다.
 
 토픽은 점으로 구분된 안정적 이름이다. 필터는 접두사 매칭이다.
 
@@ -219,6 +232,20 @@ runtime.subscriber.lagged { subscriber: "metrics", dropped: 1203 }
 버퍼 4096은 스트림 델타 버스트를 흡수할 만큼 깊고, 멈춘 구독자가 한 시간이 아니라 한 turn
 안에 드러날 만큼 얕다.
 
+**호스트 자신의 관측자도 같은 보고를 받는다.** `attach`(plugin 펌프)와 `observe`(호스트
+펌프)가 같은 함수를 쓴다 — `--jsonl`이나 TUI가 조용히 이벤트를 놓치는 동안 plugin의 유실만
+보고된다면, 하필 그 스트림을 읽으라고 만든 모드에서 스트림이 거짓말을 하게 된다.
+
+**보고는 유실 *구간*당 하나이지 `Lagged` 결과당 하나가 아니다.** 보고 자체가 `publish`이고,
+꽉 찬 채널로의 `publish`는 가장 오래된 슬롯을 덮어쓰는데 `Lagged` 직후 수신자가 재배치되는
+자리가 정확히 그 슬롯이다. 그래서 결과당 하나로 보고하면 **보고가 다음 랙을 만든다** —
+측정: 용량 8 버스, 발행 40개가 118,312개가 될 때까지 아무도 이벤트를 못 받았다. 구간은
+무언가 실제로 배달됐을 때 닫히고, 그 사이의 드롭은 보고되지 않는다. 그것들은 그 보고가 만든
+드롭이다. (`a_lag_report_does_not_feed_itself_into_a_runaway`)
+
+랙에 걸린 구독자는 **자기 랙 보고도 놓칠 수 있다.** TUI 상태바의 `dropped`가 `≥`로 표시되는
+이유이고, 그 숫자는 "지금까지 본 보고의 합"이지 "잃은 것의 총계"가 아니다.
+
 ---
 
 ## 6. Interceptor: 차단할 수 있는 유일한 구독자
@@ -262,19 +289,28 @@ interceptor는 결과를 더 엄격하게만 만들 수 있다. 단축을 허용
 ### TUI
 
 ```rust
-let mut rx = bus.subscribe_raw();
-while let Ok(envelope) = rx.recv().await {
-    match &envelope.payload {
-        Event::Agent(AgentEvent::TextDelta { text }) => ui.append(text),
-        Event::Tool(ToolEvent::Started { name, .. })  => ui.spinner(name),
-        Event::Job(JobEvent::StateChanged { .. })   => ui.refresh_checklist(),
-        _ => {}
+// `rivet-core` 만 본다. `EventSubscriber` 는 core 의 계약이고,
+// `BroadcastBus` 는 런타임 타입이므로 TUI 는 그것을 이름조차 모른다.
+#[async_trait]
+impl EventSubscriber for Tui {
+    fn name(&self) -> &str { "render.tui" }
+
+    async fn on_event(&self, envelope: &EventEnvelope) {
+        self.state.lock().unwrap().apply(envelope);   // 순수 fold
     }
 }
+
+// 붙이는 것은 호스트다:  bus.observe(tui.clone())
 ```
 
 TUI는 런타임 타입을 하나도 import 하지 않는다. **이벤트만 소비하는 클라이언트**다.
-이 성질은 Phase 3 DoD로 검증한다.
+`crates/rivet-tui/Cargo.toml`에 `rivet-runtime`이 없으므로 이것은 lint가 아니라
+**컴파일 성질**이고, `the_tui_crate_does_not_depend_on_the_runtime`이 그 매니페스트를
+파싱해 되돌리는 편집을 막는다.
+
+> 이전 판의 예시는 `bus.subscribe_raw()`를 쓰면서 두 줄 아래에서 "TUI는 런타임 타입을
+> 하나도 import 하지 않는다"고 적고 있었다. `subscribe_raw`는 `BroadcastBus`의
+> 메서드다 — 문서가 자기와 모순이었고, Phase 3이 그것을 고쳤다.
 
 ### JSONL (CI 통합)
 
@@ -285,3 +321,11 @@ rivet --jsonl "run the tests" | jq -c 'select(.payload.event == "tool")'
 `--jsonl`은 **관찰 가능성**을 위한 것이지 세션 재구성용이 아니다. 버스는 lossy이므로
 유실될 수 있는 스트림으로 durable 로그를 재구성할 수 없다. 재구성이 필요하면 세션 로그
 자체를 읽어야 한다 (`rivet session show --json`).
+
+스트림은 `runtime.started`로 시작해 `plugin.discovered` · `plugin.loaded`를 싣고,
+`runtime.shutting_down` · `plugin.unloaded`로 끝난다 — 관측자가 plugin 로드 **전에**
+붙기 때문이다. 꼬리는 시계가 아니라 채널이 정한다: 발행이 끝난 뒤 호스트가 채널이 빌
+때까지(예산 2초) 배달하고, 예산을 넘기면 "잘렸다"고 stderr에 한 줄 남긴다. 잘린 것을
+모르는 스트림보다 잘렸다고 말하는 스트림이 낫다.
+(`jsonl_carries_the_whole_lifecycle_not_just_the_answer` ·
+`the_jsonl_stream_is_not_a_session_export`)

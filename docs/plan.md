@@ -225,23 +225,142 @@ rivet plugin show rivet.tool-filesystem
 | # | 작업 | crate |
 |---|---|---|
 | 3.1 | 전체 이벤트를 실제 발행 지점에 연결 | `rivet-runtime` |
-| 3.2 | `EventSubscriber` 등록 + 토픽 필터 | `rivet-runtime` |
+| 3.2 | `EventSubscriber` 등록 + 토픽 필터 | `rivet-runtime` (등록) · `rivet-plugin` (강제) |
 | 3.3 | `telemetry.log` plugin (구조화 로그) | `plugins/` |
 | 3.4 | JSONL 이벤트 스트림 (`--jsonl`) | `rivet-cli` |
 | 3.5 | 기본 TUI (Job 패널 · Agent 패널 · 상태바) | `rivet-tui` |
 
 ### DoD
 
-- [ ] TUI가 런타임 타입을 **하나도** import 하지 않고 이벤트만 소비
-- [ ] 느린 구독자가 루프를 지연시키지 않음 (측정)
-- [ ] `SubscriberLagged`가 실제로 발행됨
-- [ ] 등록된 subscriber plugin이 실제로 이벤트를 받음 (`attach_subscriber`)
-- [ ] 언로드된 plugin의 구독 태스크가 중단됨
-- [ ] `--jsonl`이 관찰 가능성을 제공 — **세션 재구성용이 아님**
+각 항목 뒤는 그것을 증명하는 테스트 이름이다.
+
+- [x] TUI가 런타임 타입을 **하나도** import 하지 않고 이벤트만 소비
+      — `the_tui_crate_does_not_depend_on_the_runtime` (`rivet-tui`: 자기 `Cargo.toml`을
+      `toml`로 **파싱**해 `[dependencies]`·`[dev-dependencies]` 어디에도 `rivet-runtime`이
+      없고 rivet 의존이 `rivet-core` 하나임을 단언한다. 의존이 없으면
+      `use rivet_runtime::…`은 컴파일되지 않으므로 이 테스트가 지키는 것은 성질이 아니라
+      그 성질을 되돌리는 편집이다. 문자열 검색이 아닌 이유: 주석에 오탐하고
+      `rivet-runtime.workspace = true` 표기를 놓친다),
+      `every_panel_is_filled_from_events_alone` (양의 증명 — 다섯 패밀리의 envelope를
+      손으로 만들어 fold하고 Job 패널·Agent 패널·상태바를 전부 단언한다. 런타임도, 버스도,
+      터미널도 없이),
+      `the_status_bar_shows_only_what_events_carry` (음의 단언 — 어떤 이벤트도 나르지 않는
+      프로파일 이름·워크스페이스 루트는 상태바에 **없다**)
+- [x] 느린 구독자가 루프를 지연시키지 않음 (측정)
+      — `a_slow_subscriber_does_not_delay_the_loop` (`rivet-runtime/tests/event_flow.rs`:
+      버스 용량 16, `on_event`가 이벤트당 20 ms 자는 구독자, 델타 400개를 흘리는
+      `FixtureModel`로 **실제 `AgentLoop`를 돌린다**. 직렬 배달이었다면 ≥ 8 s인데 run이
+      1 s 안에 끝남을 단언한다 — 여유 8배, 상한은 루프에만 걸고 구독자에는 안 건다)
+- [x] `SubscriberLagged`가 실제로 발행됨
+      — `a_lagging_subscriber_is_reported_by_name_on_the_bus` (용량 8, `on_event` 안에
+      멈춰 있는 구독자 하나 + 기록자 하나. 이벤트 40개를 발행하고 게이트를 연 뒤, 기록자가
+      `subscriber: "wedged"`인 `runtime.subscriber.lagged`를 `dropped > 0`으로 받았음을
+      단언한다. 기존 `a_slow_subscriber_lags_instead_of_stalling_the_publisher`는 수신자의
+      `RecvError`만 봤지 발행된 이벤트를 보지 않았다),
+      `a_lag_report_does_not_feed_itself_into_a_runaway` (보고가 **구간당 하나**임 — 결과당
+      하나로 보고하면 보고 자체가 다음 랙을 만든다. §"구현 중 고친 것" 참조)
+- [x] 등록된 subscriber plugin이 실제로 이벤트를 받음 (`attach_subscriber`)
+      — `a_registered_subscriber_plugin_receives_events`
+      (`rivet-plugin/tests/subscriber.rs`: 진짜 `PluginLoader`로 `event_subscriber` +
+      `events_subscribe`를 선언한 plugin을 로드하고, 버스에 발행하고, plugin의 sink가
+      봤음을 단언한다), 짝: `the_telemetry_plugin_logs_what_it_receives` ·
+      `every_log_record_names_its_topic_and_its_run` (`plugins/telemetry-log`: `tracing`
+      테스트 레이어로 필드까지 본다)
+- [x] 언로드된 plugin의 구독 태스크가 중단됨
+      — `an_unloaded_plugins_subscription_task_stops` (로더의 `unload`를 지나는 경로로,
+      unload 전 관측 / unload 후 무관측),
+      `an_unloaded_subscriber_is_dropped_not_merely_silenced` (구독자에 `Drop` 플래그를
+      달아 펌프가 들고 있던 `Arc`가 실제로 떨어졌음을 본다 — "배달이 멈췄다"와 "태스크가
+      끝났다"는 다른 주장이고, DoD가 말하는 것은 후자다)
+- [x] `--jsonl`이 관찰 가능성을 제공 — **세션 재구성용이 아님**
+      — 두 줄이므로 두 테스트다.
+      `jsonl_carries_the_whole_lifecycle_not_just_the_answer`
+      (`rivet-cli/tests/e2e.rs`: 한 번의 실행에서 `runtime.started` ·
+      `plugin.discovered` · `plugin.loaded` · `agent.run.started` ·
+      `tool.execute.started` · `tool.execute.completed` · `agent.run.completed` ·
+      `runtime.shutting_down` · `plugin.unloaded`가 전부 스트림에 있고 `runtime.started`가
+      **첫 줄**임을 단언한다),
+      `the_jsonl_stream_is_not_a_session_export` (같은 세션에 대해 `--jsonl` 출력에는
+      `user.message`·`assistant.message`·`seq`가 **하나도 없고** `rivet session show --json`
+      에는 셋 다 있음을 단언한다 — durable fact는 버스에 없다)
 
 > 원래 DoD는 "`--jsonl` 출력만으로 세션 재구성 가능"이었다. 이것은 버스가 lossy라는
 > 설계와 모순이다. 유실될 수 있는 스트림으로 durable 로그를 재구성할 수는 없다.
 > 세션 재구성이 필요하면 세션 로그를 export 해야 한다 (`rivet session show --json`).
+
+### 작업 항목별 증명
+
+- **3.1 전체 이벤트를 발행 지점에 연결** — `every_bus_topic_is_claimed`이 28개 토픽을
+  **와일드카드 없는 두 층 `match`**로 20개(발행됨)와 8개(Phase 4의 셋 · Phase 5의 다섯)로
+  가른다. 토픽이나 패밀리가 새로 생기면 컴파일에 실패한다. 실제 발행은
+  `a_run_publishes_every_agent_and_tool_topic_this_phase_owns`(13개를 한 대본으로)와
+  `a_host_lifecycle_publishes_every_runtime_and_plugin_topic_this_phase_owns`,
+  `runtime_started_precedes_everything_it_would_describe`가 본다. `runtime.started`·
+  `runtime.shutting_down`은 신규 — `rivet_runtime::lifecycle`.
+- **3.2 `EventSubscriber` 등록 + 토픽 필터** — `rivet-plugin/tests/subscriber.rs` 14개.
+  빈 목록이 grant가 되는 것, 긴 접두사가 이기는 것, 겹치지 않으면 거부되는 것, 두 grant가
+  join되는 것, 이름이 래퍼를 통과하는 것, 슬롯 검사와 권한 검사가 서로 다른 거부인 것.
+  `architecture.md` §11-10을 닫는 테스트는
+  `a_readonly_profile_keeps_the_conversation_from_a_subscriber`.
+  **강제는 `rivet-plugin`의 guard에 있다** (이 표는 `rivet-runtime`으로 적고 있었다):
+  grant가 이미 거기 있고, `Registry::scoped`에 grant 인자를 더하는 것은 모든 embedder에
+  대해 Phase 0 계약을 바꾸는 일이다. 등록 경로(`attach_subscriber`)는 런타임에 남는다.
+- **3.3 `telemetry.log` plugin** — id는 `rivet.telemetry-log`(아무도 소유하지 않는
+  `telemetry` namespace를 만들지 않는다). `the_default_topics_survive_every_shipped_profile` ·
+  `a_readonly_profile_refuses_a_telemetry_plugin_that_was_told_to_log_the_conversation` ·
+  `configured_topics_the_profile_narrows_are_refused_not_silently_dropped` ·
+  `include_conversation_off_means_it_does_not_even_subscribe` ·
+  `the_telemetry_plugin_logs_a_run_when_enabled` (e2e) ·
+  `the_telemetry_plugin_is_not_in_the_default_selection` (e2e).
+- **3.4 JSONL 이벤트 스트림** — DoD 6의 둘에 더해
+  `a_truncated_drain_is_reported_not_swallowed`(`sleep(20 ms); abort()`를 대신한
+  `drain_within`이 잘린 것을 **말한다**), 회귀 감시로 기존
+  `jsonl_output_is_one_parseable_event_per_line`, 그리고
+  `an_opt_in_plugin_is_absent_by_default_and_loads_when_named` ·
+  `every_default_selection_id_is_in_the_catalog` ·
+  이름을 고친 `with_no_config_file_every_plugin_the_default_selection_names_is_loaded`.
+- **3.5 기본 TUI** — `the_agent_panel_follows_a_run_from_start_to_stop` ·
+  `the_job_panel_renders_what_job_events_carry`(job 런타임 없이 `job.*` envelope만으로) ·
+  `the_job_panel_says_where_jobs_come_from_when_empty` ·
+  `the_status_bar_counts_drops_from_the_lag_report` ·
+  `the_three_panels_fit_an_eighty_column_terminal`(`TestBackend` 스냅샷) ·
+  `quitting_asks_the_host_rather_than_reaching_for_the_token` ·
+  `ctrl_c_in_the_tui_asks_for_a_cancel` + `a_second_cancel_intent_forces_the_exit`
+  (raw mode가 SIGINT를 삼키므로 Phase 1의 **두 겹** 보장을 TUI 안에서 다시 만든다) ·
+  `tui_refuses_a_pipe`(e2e).
+
+### 구현 중 고친 것 — 랙 보고가 자기 자신을 먹여 살렸다
+
+설계는 "보고는 `Lagged` 결과 하나당 하나이고 되먹임 폭주는 없다"고 적었다. 틀렸다. 보고
+자체가 `publish`이고, 꽉 찬 채널로의 `publish`는 가장 오래된 슬롯을 덮어쓰는데 `Lagged`
+직후 tokio가 수신자를 재배치하는 자리가 정확히 그 슬롯이다. **측정: 용량 8 버스에 뒤처진
+구독자 둘, 발행 40개가 118,312개가 될 때까지 아무도 이벤트를 하나도 못 받았다.** DoD 2·3의
+랙 단언이 둘 다 이것 때문에 처음에 실패했다.
+
+`pump`가 이제 **유실 구간당 한 번만** 보고한다. 구간은 무언가 실제로 배달됐을 때 닫히고,
+그 사이의 드롭은 보고되지 않는다 — 그것들은 그 보고가 만든 드롭이다. Phase 0부터 `attach`에
+있던 성질이고, 얕은 버스에 뒤처진 구독자를 둘 올린 적이 없어서 안 드러났다.
+
+### 미검증으로 남긴 것
+
+`--tui`의 **실제 raw mode 경로**는 자동화 테스트가 없다. 파이프 거부(`tui_refuses_a_pipe`),
+키 매핑(`ctrl_c_in_the_tui_asks_for_a_cancel` · `a_second_cancel_intent_forces_the_exit`),
+그리기(`TestBackend` 스냅샷)는 전부 테스트가 있지만, "진짜 터미널에서 raw mode에 들어갔다
+나온다"는 pty가 필요하고 Phase 3은 그것을 도입하지 않았다. `TerminalGuard`의 `Drop` + 패닉
+훅이 복구를 맡는다.
+
+`Plugin::load`/`unload`의 **타임아웃은 여전히 없다** (Phase 2가 남긴 것). Phase 3은 그것을
+고치지 않고 **보이게** 만들었다 — 관측자가 로드 **전에** 붙으므로 매달린 `load`가
+"`runtime.started`와 `plugin.discovered`는 있는데 `plugin.loaded`도 `plugin.load.failed`도
+없는 스트림"으로 드러난다
+(`a_load_that_hangs_shows_up_as_a_discovered_plugin_that_never_loaded`). 진단이 생겼지
+데드라인이 생긴 것은 아니다. 데드라인이 누구 몫인지는 `architecture.md` §11-15.
+
+`events_publish`는 강제되지 않는다. `ctx.events`가 grant와 무관하게 넘어가므로 plugin이
+위조 `agent.*`를 발행할 수 있다. 모든 프로파일이 이 권한을 주므로 오늘 아무것도 안 터지고,
+진짜 답은 발행자를 envelope에 스탬프하는 것이며 그건 Phase 6의 모양이다.
+
+설계 문서: [`design/phase-3-event.md`](./design/phase-3-event.md).
 
 ---
 
@@ -389,7 +508,7 @@ rivet job list
 | 0 Repository | ✅ 완료 | 135 passed · clippy 0 · 리뷰 2회전 반영 완료 |
 | 1 Minimal Agent | ✅ 완료 | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 전부 충족 (1번은 실제 provider 수동 검증) · build 리뷰 지적 11건 반영 |
 | 2 Plugin | ✅ 완료 | 456 passed (+71) · clippy 0 · `cargo doc` 0 · DoD 5개 전부 충족 · 롤백 무결성(`Err`·패닉·`load` 이후의 뒤늦은 등록) 테스트로 확인 · 설계 [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) · 리뷰 2라운드 지적 반영(등록 창구 봉인 · 배치 승격 범위 · `plugin show`의 ABI 거부 표시) · 리뷰 3라운드 반영(성공 경로 봉인 테스트 · ABI 판정 단일 출처 · `seal` 비공개화) |
-| 3 Event | ⬜ | TUI가 런타임 타입 미참조 |
+| 3 Event | ✅ 완료 | 559 passed (+92) · clippy 0 · `cargo doc` 0 · DoD 6개 전부 충족 · `rivet-tui`에서 `rivet-runtime` 의존 제거(컴파일 성질) · `events_subscribe` scope 강제(`architecture.md` §11-10 닫힘) · 새 plugin `rivet.telemetry-log`(기본 선택 밖) · 설계 [`design/phase-3-event.md`](./design/phase-3-event.md) · 리뷰 2라운드 지적 반영 · 구현 중 발견해 고친 것: 랙 보고 되먹임 폭주(40 → 118,312) |
 | 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |
 | 5 Job Runtime | ⬜ | Demo 무개입 완주 |
 | 6 External Plugin | ⬜ | 동일 소스 양쪽 동작 |

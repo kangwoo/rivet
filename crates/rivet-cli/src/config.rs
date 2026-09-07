@@ -557,34 +557,73 @@ fn selection(enabled: &[String]) -> rivet_core::Result<PluginSelection> {
 
 #[cfg(test)]
 mod tests {
-    /// Adding an `AgentEvent` variant must not silently deny it to the narrowed profiles.
+    /// Adding a topic must not silently deny it to the narrowed profiles.
     ///
     /// The grant enumerates prefixes because prefixes cannot express "not `agent.text`",
-    /// so a new topic falls outside the list — safe, and silent. This is the tripwire: the
-    /// `match` has no wildcard, so a new variant fails to compile *here*, next to the
-    /// decision about whether the narrowed profiles should receive it.
+    /// so a new topic falls outside the list — safe, and silent. This is the tripwire, and
+    /// since Phase 3 it has **two layers**: the outer `match` over
+    /// [`rivet_core::event::Event`] has no wildcard either, so a new topic *family* — the
+    /// case `Event::topic`'s doc used to call out in prose — fails to compile here as well.
+    ///
+    /// It folds over values rather than topic strings on purpose. A `&str` key would let
+    /// this loop keep compiling forever and turn today's compile error into tomorrow's
+    /// runtime surprise; the `match` needs values to be exhaustive over.
+    ///
+    /// Renamed from `every_agent_topic_is_granted_or_deliberately_withheld` when it stopped
+    /// being about one family.
     #[test]
-    fn every_agent_topic_is_granted_or_deliberately_withheld() {
+    fn every_topic_is_granted_or_deliberately_withheld() {
         use rivet_core::capability::{Permission, TopicScope};
-        use rivet_core::event::AgentEvent;
+        use rivet_core::event::{AgentEvent, Event, JobEvent, PluginEvent};
+        use rivet_core::event::{RuntimeEvent, ToolEvent};
 
         // `false` means "withheld on purpose". Adding a variant means answering this.
-        fn should_reach_a_narrowed_profile(topic: &AgentEvent) -> bool {
-            match topic {
-                AgentEvent::RunStarted { .. }
-                | AgentEvent::TurnStarted { .. }
-                | AgentEvent::RequestStarted { .. }
-                | AgentEvent::RequestCompleted { .. }
-                | AgentEvent::RequestFailed { .. }
-                | AgentEvent::TurnCompleted { .. }
-                | AgentEvent::RunCompleted { .. } => true,
-                // The model's output, verbatim. The reason the grant is narrowed at all.
-                AgentEvent::TextDelta { .. } => false,
+        fn should_reach_a_narrowed_profile(event: &Event) -> bool {
+            match event {
+                Event::Agent(agent) => match agent {
+                    AgentEvent::RunStarted { .. }
+                    | AgentEvent::TurnStarted { .. }
+                    | AgentEvent::RequestStarted { .. }
+                    | AgentEvent::RequestCompleted { .. }
+                    | AgentEvent::RequestFailed { .. }
+                    | AgentEvent::TurnCompleted { .. }
+                    | AgentEvent::RunCompleted { .. } => true,
+                    // The model's output, verbatim. The reason the grant is narrowed at all.
+                    AgentEvent::TextDelta { .. } => false,
+                },
+                Event::Tool(tool) => match tool {
+                    ToolEvent::Requested { .. }
+                    | ToolEvent::PolicyEvaluated { .. }
+                    | ToolEvent::ApprovalRequested { .. }
+                    | ToolEvent::ApprovalResolved { .. }
+                    | ToolEvent::Started { .. }
+                    | ToolEvent::Progress { .. }
+                    | ToolEvent::Completed { .. }
+                    | ToolEvent::Blocked { .. } => true,
+                },
+                Event::Job(job) => match job {
+                    JobEvent::Created { .. }
+                    | JobEvent::StateChanged { .. }
+                    | JobEvent::RunAttached { .. }
+                    | JobEvent::ReviewRequested { .. }
+                    | JobEvent::ReviewCompleted { .. } => true,
+                },
+                Event::Plugin(plugin) => match plugin {
+                    PluginEvent::Discovered { .. }
+                    | PluginEvent::Loaded { .. }
+                    | PluginEvent::LoadFailed { .. }
+                    | PluginEvent::Unloaded { .. } => true,
+                },
+                Event::Runtime(runtime) => match runtime {
+                    RuntimeEvent::Started { .. }
+                    | RuntimeEvent::ShuttingDown { .. }
+                    | RuntimeEvent::SubscriberLagged { .. } => true,
+                },
             }
         }
 
         let granted = super::Profile::ReadOnly.permissions();
-        for event in rivet_core::event::AgentEvent::one_of_each() {
+        for event in Event::one_of_each() {
             let wanted = Permission::EventsSubscribe(Some(
                 TopicScope::new([event.topic().to_string()]).expect("a real topic"),
             ));

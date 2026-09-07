@@ -44,6 +44,13 @@ struct Cli {
     #[arg(long, global = true, conflicts_with = "headless")]
     jsonl: bool,
 
+    /// Draw the full-screen UI: job panel, agent panel, status bar.
+    ///
+    /// Opt-in in Phase 3. It needs a terminal, so it refuses a pipe rather than putting one
+    /// into raw mode and leaving nothing to restore.
+    #[arg(long, global = true, conflicts_with_all = ["headless", "jsonl"])]
+    tui: bool,
+
     /// Override the configured policy profile.
     ///
     /// In Phase 1 a profile narrows which tools the agent is offered. It is not policy
@@ -142,15 +149,23 @@ enum PluginCommand {
 /// tool cannot turn Ctrl-C into a hang.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The default `tracing` filter.
+///
+/// `warn` for everything, plus `info` for the telemetry plugin — a structured-log plugin
+/// that is switched on and emits nothing visible is not a structured-log plugin. `RUST_LOG`
+/// still overrides the whole thing.
+///
+/// This does not change the default run's output: `rivet.telemetry-log` is outside
+/// `catalog::default_selection`, so on a tree nobody configured this directive has nothing
+/// to point at.
+const DEFAULT_LOG_FILTER: &str = "warn,rivet_telemetry_log=info";
+
+/// Environment variable selecting the log format. `json` gives one JSON object per record.
+const LOG_FORMAT_ENV: &str = "RIVET_LOG_FORMAT";
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    init_tracing();
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -172,6 +187,26 @@ fn main() -> std::process::ExitCode {
     // running after it is left to the exiting process.
     runtime.shutdown_timeout(SHUTDOWN_GRACE);
     std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+/// Set up `tracing`'s stderr sink.
+///
+/// The JSON layer is behind an environment variable rather than a flag because the choice
+/// belongs to whoever is *collecting* the logs, not to whoever typed the prompt — and
+/// because `--jsonl` already means something else on this binary. Without it "structured
+/// log" would be half true: the fields exist, and nothing machine-readable comes out.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
+    let json = std::env::var(LOG_FORMAT_ENV).is_ok_and(|value| value == "json");
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
+    if json {
+        builder.json().init();
+    } else {
+        builder.init();
+    }
 }
 
 async fn dispatch(cli: Cli) -> i32 {
@@ -200,6 +235,8 @@ async fn dispatch(cli: Cli) -> i32 {
 
     let output = if cli.jsonl {
         Output::Jsonl
+    } else if cli.tui {
+        Output::Tui
     } else {
         Output::Human
     };
@@ -307,6 +344,34 @@ mod tests {
             Cli::try_parse_from(["rivet", "--headless", "--jsonl", "x"]).is_err(),
             "two output modes at once is a user error worth catching"
         );
+    }
+
+    #[test]
+    fn the_three_output_modes_are_mutually_exclusive() {
+        for pair in [
+            ["--tui", "--jsonl"],
+            ["--tui", "--headless"],
+            ["--jsonl", "--headless"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["rivet", pair[0], pair[1], "x"]).is_err(),
+                "{pair:?} should not parse together"
+            );
+        }
+        assert!(Cli::try_parse_from(["rivet", "--tui", "x"]).is_ok());
+    }
+
+    #[test]
+    fn the_default_log_filter_only_raises_the_telemetry_plugin() {
+        // Changing the CLI's default stderr behavior is worth being deliberate about. The
+        // directive names one target and leaves everything else at `warn`.
+        assert!(DEFAULT_LOG_FILTER.starts_with("warn"));
+        assert_eq!(
+            DEFAULT_LOG_FILTER.matches('=').count(),
+            1,
+            "one target is raised, and it is the telemetry plugin: {DEFAULT_LOG_FILTER}"
+        );
+        assert!(DEFAULT_LOG_FILTER.contains("rivet_telemetry_log=info"));
     }
 
     #[test]

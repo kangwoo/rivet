@@ -1,0 +1,27 @@
+[package]
+name = "rivet-telemetry-log"
+description = "Structured logs from the event bus, through `tracing`. Observation only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rivet-core.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The plugin itself sees only `rivet-core`. These drive it the way a host does, which is
+# the only way to prove the grant reaches the subscriber.
+rivet-plugin.workspace = true
+rivet-runtime.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

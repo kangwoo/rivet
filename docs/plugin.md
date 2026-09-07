@@ -25,7 +25,11 @@ Plugin이 하는 일은 하나다: **넘겨받은 registry에 capability를 등�
 | `Scheduler` | `Scheduler` | READY job → Agent Run |
 | `Evaluator` | `Evaluator` | 완료된 Run 채점 |
 | `EventSubscriber` | `EventSubscriber` | 관찰 (차단 불가) |
-| `Command` | — | CLI 하위 명령 (Phase 3) |
+| `Command` | — | CLI 하위 명령 (Phase 3에는 **없다** — 아래 각주) |
+
+> `Command`에 각주: `docs/plan.md`의 Phase 3 작업 항목(3.1–3.5)에 CLI 하위 명령이 없다.
+> 작업 항목의 출처는 plan.md이므로 Phase 3은 이것을 만들지 않았다. 이 표와 plan.md 중
+> 어느 쪽이 틀렸는지는 그 명령이 실제로 필요해지는 Phase에서 정한다.
 
 ---
 
@@ -135,12 +139,27 @@ scope 목록은 **집합**이다. `TopicScope`(토픽)와 `StringSet`(호스트�
 ([`security.md` §8](./security.md)). `events_subscribe(["agent.text."])`를 선언한 plugin은
 그 프로파일에서 교집합이 비므로 아래 관용구 (1)이 발동한다.
 
-> **⚠ 다만 이 scope는 `fs_read`와 같은 자리에 있다 — 지금은 선언이지 강제가 아니다.**
-> `BroadcastBus::attach`는 `EventSubscriber::topics()`로 거르는데 그건 구독자 자신의
-> 선호이고, 기본값인 빈 목록은 "전부"로 읽힌다. 즉 scope를 좁게 선언해도 실제로는 모든
-> 토픽이 배달되고, `events_subscribe`를 선언하지 않은 plugin도 구독할 수 있다. 배선은
-> Phase 3(3.2)이다. 그때까지 좁은 scope를 적는 것은 **의도의 선언**이고, 관용구 (1)로
-> 스스로 확인하는 것은 여전히 유효하다.
+**Phase 3부터 이 scope는 강제된다.** 규칙 셋:
+
+1. **빈 `topics()`는 "전부"가 아니라 grant의 목록이다.** 선호를 적지 않은 구독자는
+   프로파일이 주는 만큼을 받는다. (`an_empty_topics_list_becomes_the_grant_not_everything`)
+2. **`events_subscribe`가 없으면 구독자를 등록할 수 없다.** `register_subscriber`가 `Err`를
+   낸다. 에러 문장은 둘로 갈린다 — 매니페스트가 요청한 적이 없거나, 프로파일이 깎았거나.
+   운영자가 할 일이 다르기 때문이다(매니페스트를 고쳐라 / `--profile`을 바꿔라).
+   (`a_manifest_that_never_asked_and_a_profile_that_removed_it_say_different_things`)
+3. **grant와 겹치지 않는 `topics()`는 `Err`다.** 조용히 빈 목록으로 넘기면 (1) 때문에
+   "전부"가 되어 정반대로 실패한다.
+   (`a_subscriber_whose_topics_fall_outside_its_grant_is_refused`)
+
+배달되는 목록은 `grant ⊓ topics()`이고, 그 meet은 `manifest ∩ profile`이 쓰는 것과 **같은
+함수**다(`Permission::meet`). 판정 지점이 둘로 갈라지지 않도록 새 헬퍼를 쓰지 않았다.
+등록 시점에 고정되므로 plugin이 나중에 자기 `topics()`를 넓혀도 배달은 안 넓어진다.
+
+**부분적으로 좁혀지는 경우는 거절이 아니다.** 접두사의 meet은 합집합이므로
+`["tool.", "agent.text."]`를 `readonly`에 태우면 `tool.`만 살아남고 meet은 비지 않는다 —
+호스트는 통과시키고 `tracing::debug!`로 좁혔다는 사실과 양쪽 목록만 남긴다. 운영자가
+*적어 넣은* 것이 사라지는 것을 거절로 만들지 말지는 plugin 자신의 몫이다. `rivet.telemetry-log`가
+그 관용구를 쓴다(§4.2의 관용구 (1)).
 
 ---
 
@@ -266,6 +285,14 @@ async fn load(&self, ctx: PluginContext) -> Result<PluginHandle> {
 `claim_matches_reality()`가 false가 되고 `rivet doctor`가 "reported" 경고를 낸다. **같은
 설정으로 `rivet doctor`를 두 번 돌렸는데 한 번만 경고가 뜬다면 이 경우다** — 무작위가
 아니라 태스크에서 등록하는 plugin이 있다는 뜻이고, 고칠 곳은 타이밍이 아니라 그 태스크다.
+
+**언로드는 협조적인 구독자에 대해서만 확실하다.** 레지스트리는 언로드 시 그 plugin의 구독
+펌프를 `JoinHandle::abort`로 끊는데, abort는 다음 await 지점에서 효력이 있다. `on_event`
+안에서 동기적으로 블로킹하면(막힌 파이프로의 로그 쓰기 같은) 그 지점이 없다. 경계는 좁다 —
+루프는 안 멈추고(발행은 동기이며 배달은 별도 태스크다), 멈추는 것은 그 구독자의 펌프 하나이며,
+레지스트리 표에서는 이미 사라졌으므로 `unload`는 반환하고 이름은 재로드에 쓸 수 있다. 회계는
+어긋나지 않고 태스크 하나가 프로세스 끝까지 샌다. `on_event`는 **즉시 반환해야 한다**는
+계약이 이것 때문에 있다.
 
 ### 4.2 권한은 넓힐 수 없다
 

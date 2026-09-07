@@ -14,6 +14,7 @@ members = [
     "plugins/tool-shell",
     "plugins/tool-git",
     "plugins/policy-default",
+    "plugins/telemetry-log",
     "plugins/sandbox-local",
     "examples/minimal-agent",
 ]
@@ -41,6 +42,7 @@ rivet-context-builtin = { path = "plugins/context-builtin", version = "0.1.0" }
 rivet-tool-shell = { path = "plugins/tool-shell", version = "0.1.0" }
 rivet-tool-git = { path = "plugins/tool-git", version = "0.1.0" }
 rivet-policy-default = { path = "plugins/policy-default", version = "0.1.0" }
+rivet-telemetry-log = { path = "plugins/telemetry-log", version = "0.1.0" }
 rivet-sandbox-local = { path = "plugins/sandbox-local", version = "0.1.0" }
 
 # external
