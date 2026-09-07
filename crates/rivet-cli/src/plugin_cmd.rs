@@ -194,12 +194,15 @@ fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
     if !record.permissions_computed {
         return "not evaluated (this plugin never passed validation)".to_string();
     }
-    // Against the canonical form on both sides: `meet` returns scope lists sorted, while
-    // `wanted` is in the order the manifest author wrote. Comparing the two directly
-    // reported a permission granted in full as "narrowed by profile", which is the
-    // alarming direction for the command an operator audits with.
+    // Canonical on *both* sides of *both* comparisons. `effective` holds what `meet`
+    // produced, which is canonical; `denied` holds what the manifest asked for, in the
+    // author's own order, because that is what `PluginRecord::denied` documents. So the
+    // spelling has to be normalised at the comparison rather than in either store --
+    // fixing only the `effective` branch made a permission the profile removed *whole*
+    // read as "narrowed", which is the reassuring direction and worse than the alarming
+    // one it replaced.
     let wanted = wanted.canonicalised();
-    if record.denied.contains(&wanted) {
+    if record.denied.iter().any(|d| d.canonicalised() == wanted) {
         format!("removed by profile `{profile}`")
     } else if record.effective.contains(&wanted) {
         "granted".to_string()
@@ -380,6 +383,39 @@ mod tests {
                 effect(&record, &wanted, "developer"),
                 "granted",
                 "{wanted:?} was granted in full"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scope_removed_in_full_is_not_reported_as_narrowed() {
+        // The other half of the comparison. `record.denied` holds what the manifest asked
+        // for, in the author's order -- that is what it documents. Canonicalising only
+        // `effective` made a permission the profile removed *whole* read as "narrowed",
+        // which is the reassuring direction: an operator auditing with `plugin show`
+        // believes the plugin kept part of a grant it has none of.
+        //
+        // No profile grants `secrets_read` at all, so every such manifest is removed in
+        // full and the spelling is the only variable.
+        for wanted in [
+            Permission::SecretsRead(vec!["B_TOKEN".into(), "A_TOKEN".into()]),
+            Permission::SecretsRead(vec!["A_TOKEN".into(), "B_TOKEN".into()]),
+            // Absorption widens the surface: a *sorted* list can canonicalise to
+            // something else too.
+            Permission::EventsSubscribe(Some(vec![
+                "agent.text.".into(),
+                "agent.text.delta".into(),
+            ])),
+        ] {
+            let mut record = record_asking_for(vec![wanted.clone()]);
+            record.effective = PermissionSet::new([]);
+            // Verbatim, exactly as `PluginLoader::validate` builds it.
+            record.denied = vec![wanted.clone()];
+
+            assert_eq!(
+                effect(&record, &wanted, "readonly"),
+                "removed by profile `readonly`",
+                "{wanted:?} was removed in full, whatever order it was written in"
             );
         }
     }

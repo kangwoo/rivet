@@ -555,6 +555,44 @@ fn selection(enabled: &[String]) -> rivet_core::Result<PluginSelection> {
 
 #[cfg(test)]
 mod tests {
+    /// Adding an `AgentEvent` variant must not silently deny it to the narrowed profiles.
+    ///
+    /// The grant enumerates prefixes because prefixes cannot express "not `agent.text`",
+    /// so a new topic falls outside the list — safe, and silent. This is the tripwire: the
+    /// `match` has no wildcard, so a new variant fails to compile *here*, next to the
+    /// decision about whether the narrowed profiles should receive it.
+    #[test]
+    fn every_agent_topic_is_granted_or_deliberately_withheld() {
+        use rivet_core::capability::Permission;
+        use rivet_core::event::AgentEvent;
+
+        // `false` means "withheld on purpose". Adding a variant means answering this.
+        fn should_reach_a_narrowed_profile(topic: &AgentEvent) -> bool {
+            match topic {
+                AgentEvent::RunStarted { .. }
+                | AgentEvent::TurnStarted { .. }
+                | AgentEvent::RequestStarted { .. }
+                | AgentEvent::RequestCompleted { .. }
+                | AgentEvent::RequestFailed { .. }
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::RunCompleted { .. } => true,
+                // The model's output, verbatim. The reason the grant is narrowed at all.
+                AgentEvent::TextDelta { .. } => false,
+            }
+        }
+
+        let granted = super::Profile::ReadOnly.permissions();
+        for event in rivet_core::event::AgentEvent::one_of_each() {
+            let wanted = Permission::EventsSubscribe(Some(vec![event.topic().to_string()]));
+            assert_eq!(
+                granted.allows(&wanted),
+                should_reach_a_narrowed_profile(&event),
+                "`{}` — grant it in `Profile::subscribable_topics`, or say `false` above",
+                event.topic()
+            );
+        }
+    }
+
     /// The decision recorded in `architecture.md` §11-10: who may subscribe, and to what.
     #[test]
     fn only_the_writable_profiles_may_subscribe_to_the_model_output() {

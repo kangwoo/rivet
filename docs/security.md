@@ -379,7 +379,8 @@ rivet --profile readonly "왜 이 테스트가 실패하지?"
 ```
 
 > **⚠ `events_subscribe`의 scope는 아직 선언이지 강제가 아니다.** `fs_read`와 같은
-> 자리에 있다 (아래 §"권한" 참조).
+> 자리에 있다 — [`plugin.md` §4.2](./plugin.md)와
+> [`architecture.md` §11-13](./architecture.md)이 그쪽을 같은 어조로 적고 있다.
 >
 > 어휘와 프로파일 grant는 있다 — `developer`·`ci`는 모든 토픽, `readonly`·`reviewer`·
 > `production`은 `agent.text`를 뺀 나머지다. 그런데 **배달 경로가 그 grant를 읽지

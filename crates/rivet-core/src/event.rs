@@ -120,6 +120,14 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
+    /// The topic this event publishes on.
+    ///
+    /// Topics are also what [`crate::capability::Permission::EventsSubscribe`] scopes
+    /// over, and the narrowed profiles are granted by *enumerating* prefixes rather than
+    /// excluding one — prefixes cannot express "not". **So a topic added here is not
+    /// granted to `readonly`, `reviewer` or `production` until somebody adds it to
+    /// `Profile::subscribable_topics` in `rivet-cli`.** That is the safe direction and the
+    /// silent one, which is why the warning is at the line you would be editing.
     #[must_use]
     pub fn topic(&self) -> &'static str {
         match self {
@@ -132,6 +140,45 @@ impl AgentEvent {
             Self::TurnCompleted { .. } => "agent.turn.completed",
             Self::RunCompleted { .. } => "agent.run.completed",
         }
+    }
+
+    /// One value per variant, so a caller can enumerate the topics without a wildcard.
+    ///
+    /// Exists for `rivet-cli`'s check that every agent topic is either granted to the
+    /// narrowed profiles or deliberately withheld: adding a variant has to break that
+    /// test rather than quietly fall outside the grant.
+    #[must_use]
+    pub fn one_of_each() -> Vec<Self> {
+        use crate::model::{StopReason, Usage};
+        vec![
+            Self::RunStarted {
+                agent_id: crate::id::AgentId::new(),
+                model: crate::model::ModelId::new("p/m").expect("valid"),
+            },
+            Self::TurnStarted { turn: 1 },
+            Self::RequestStarted {
+                model: crate::model::ModelId::new("p/m").expect("valid"),
+                input_tokens_estimate: 0,
+            },
+            Self::TextDelta {
+                text: String::new(),
+            },
+            Self::RequestCompleted {
+                usage: Usage::default(),
+                stop_reason: StopReason::EndTurn,
+                latency_ms: 0,
+            },
+            Self::RequestFailed {
+                error: String::new(),
+                will_retry: false,
+                attempt: 1,
+            },
+            Self::TurnCompleted { turn: 1 },
+            Self::RunCompleted {
+                turns: 1,
+                stop: crate::agent::StopReason::EndTurn,
+            },
+        ]
     }
 }
 
@@ -321,13 +368,6 @@ pub trait EventSubscriber: Send + Sync + fmt::Debug {
     async fn on_event(&self, envelope: &EventEnvelope);
 }
 
-/// Topics are also what [`crate::capability::Permission::EventsSubscribe`] scopes over, and
-/// the narrowed profiles are granted by *enumerating* prefixes rather than excluding one —
-/// prefixes cannot express "not". So a topic added under an existing namespace is not
-/// granted to `readonly`, `reviewer` or `production` until somebody adds it there. That is
-/// the safe direction, and this is the note that says so at the place a topic is minted:
-/// see `Profile::subscribable_topics` in `rivet-cli`.
-///
 /// Whether a topic filter matches a topic.
 #[must_use]
 pub fn topic_matches(filters: &[String], topic: &str) -> bool {
