@@ -247,8 +247,12 @@ impl Profile {
     ///
     /// `None` is every topic. The narrowed profiles get everything except `agent.text`,
     /// which streams the model's output verbatim — a plugin that may not write code has no
-    /// business receiving the whole conversation, and `EventSubscriber::topics()` is the
-    /// subscriber's own preference, so this grant is the only thing that decides it.
+    /// business receiving the whole conversation.
+    ///
+    /// **Not enforced yet.** `BroadcastBus::attach` filters on the subscriber's own
+    /// `topics()`, which defaults to everything, and reads no permission. This value is
+    /// the vocabulary Phase 3 wires at `attach_subscriber`; deciding it first is what
+    /// keeps Phase 3 from building on a bare variant. See `docs/architecture.md` §11-10.
     ///
     /// The exclusion is spelled by naming `agent.text`'s siblings because topic scopes are
     /// prefixes and prefixes cannot express "not". That is worth the verbosity: a topic

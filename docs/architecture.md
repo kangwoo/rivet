@@ -731,6 +731,18 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    호스트 자신의 소비자(`--jsonl` 렌더러, Phase 3의 TUI)는 `bus.attach()`를 직접 부르며
    이 권한을 거치지 않는다. 호스트는 plugin이 아니고, 그 둘을 무엇이 제약하는지는
    프로파일이 아니라 CLI를 실행한 사람이다.
+
+   **셋째로, 이 scope는 아직 강제되지 않는다 — 어휘와 grant만 정했다.** 배달 경로가
+   grant를 읽지 않는다: `BroadcastBus::attach`는 `EventSubscriber::topics()`로 거르고,
+   그건 구독자 자신의 선호이며 빈 목록이 "전부"로 읽힌다. 그래서 `["tool."]`만 가진
+   plugin도 `agent.text.delta`를 받고, `events_subscribe`를 선언하지 않은 plugin도
+   구독할 수 있다. `fs_read`(§11-13)와 정확히 같은 자리다.
+
+   배선은 **Phase 3**이고 이음매는 `attach_subscriber`다 — 빈 `topics()`가 "전부"가
+   아니라 grant의 목록이 되어야 하고, `events_subscribe` 없는 plugin은 구독자를 등록할
+   수 없어야 한다. 어휘를 Phase 3보다 **먼저** 정한 이유가 이것이다: 3.2가
+   "`EventSubscriber` 등록 + 토픽 필터"인데, 맨몸 permission 위에 그것을 지으면 나중에
+   scope를 넣는 비용이 훨씬 커진다. 근거: PR #2 리뷰 blocking 1.
 11. **`Interceptor`에 대응하는 `CapabilityKind`가 없다** — manifest guard가
    `register_interceptor`를 선언된 슬롯에 매핑할 수 없어 잠정적으로 `capabilities = ["policy"]`를
    요구한다. 변형을 추가하는 것은 닫힌 어휘를 넓히는 `rivet-core` 변경이라 Phase 2 범위 밖으로

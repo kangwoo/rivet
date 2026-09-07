@@ -182,11 +182,33 @@ impl Permission {
     ///
     /// Scope lists are sets, but they are carried as `Vec` and compared with `==`. This is
     /// what keeps two spellings of one set from being two different permissions.
+    /// Whether this permission is well-formed enough to be a grant.
+    ///
+    /// `EventsSubscribe(Some([]))` is spellable through `Deserialize` and means opposite
+    /// things at either end: `meet_topics` treats an empty result as *no overlap*, while
+    /// [`crate::event::topic_matches`] reads an empty filter list as *every topic*. The
+    /// TOML reader rejects it, but `PluginManifest` derives `Deserialize` and Phase 6's
+    /// out-of-process path goes through that, so the check belongs here too.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::EventsSubscribe(Some(topics)) => {
+                !topics.is_empty() && !topics.iter().any(String::is_empty)
+            }
+            Self::NetworkHttp(Some(hosts)) => !hosts.is_empty(),
+            Self::SecretsRead(keys) => !keys.is_empty(),
+            Self::FsRead(scope) | Self::FsWrite(scope) => scope.is_valid(),
+            _ => true,
+        }
+    }
+
     #[must_use]
     pub fn canonicalised(&self) -> Self {
         match self {
             Self::NetworkHttp(Some(hosts)) => Self::NetworkHttp(Some(canonical(hosts))),
-            Self::EventsSubscribe(Some(topics)) => Self::EventsSubscribe(Some(canonical(topics))),
+            Self::EventsSubscribe(Some(topics)) => {
+                Self::EventsSubscribe(Some(canonical_topics(topics)))
+            }
             Self::SecretsRead(keys) => Self::SecretsRead(canonical(keys)),
             other => other.clone(),
         }
@@ -201,6 +223,11 @@ impl Permission {
     /// up with fewer permissions than a sloppy one.
     #[must_use]
     pub fn meet(&self, other: &Self) -> Option<Self> {
+        // A malformed scope grants nothing rather than being read as one of the two
+        // things an empty list could mean.
+        if !self.is_well_formed() || !other.is_well_formed() {
+            return None;
+        }
         match (self, other) {
             (Self::FsRead(a), Self::FsRead(b)) => a.meet(b).map(Self::FsRead),
             (Self::FsWrite(a), Self::FsWrite(b)) => a.meet(b).map(Self::FsWrite),
@@ -298,7 +325,7 @@ enum TopicMeet {
 fn meet_topics(a: Option<&[String]>, b: Option<&[String]>) -> TopicMeet {
     match (a, b) {
         (None, None) => TopicMeet::AllTopics,
-        (None, Some(list)) | (Some(list), None) => TopicMeet::Topics(canonical(list)),
+        (None, Some(list)) | (Some(list), None) => TopicMeet::Topics(canonical_topics(list)),
         (Some(x), Some(y)) => {
             let mut topics = Vec::new();
             for p in x {
@@ -310,8 +337,7 @@ fn meet_topics(a: Option<&[String]>, b: Option<&[String]>) -> TopicMeet {
                     }
                 }
             }
-            topics.sort();
-            topics.dedup();
+            let topics = canonical_topics(&topics);
             if topics.is_empty() {
                 TopicMeet::Disjoint
             } else {
@@ -330,6 +356,29 @@ fn canonical(list: &[String]) -> Vec<String> {
     let mut out = list.to_vec();
     out.sort();
     out.dedup();
+    out
+}
+
+/// [`canonical`], plus dropping any prefix another entry already covers.
+///
+/// Only valid for prefixes: `["tool.", "tool.execute."]` and `["tool."]` admit the same
+/// topics, so carrying both makes two spellings of one set — and `allows`, which asks
+/// whether the meet *equals* what was wanted, then refuses a grant strictly wider than the
+/// request. Hosts and secret keys are exact strings, so this must not be applied to them:
+/// `a.example` does not cover `a.example.net`.
+fn canonical_topics(list: &[String]) -> Vec<String> {
+    let sorted = canonical(list);
+    let mut out: Vec<String> = Vec::with_capacity(sorted.len());
+    for topic in sorted {
+        // Sorted order puts a prefix before anything it covers, so checking the last kept
+        // entry is enough.
+        if out
+            .last()
+            .is_none_or(|kept| !topic.starts_with(kept.as_str()))
+        {
+            out.push(topic);
+        }
+    }
     out
 }
 
@@ -449,6 +498,49 @@ mod tests {
             "a.".into(),
         ]))]);
         assert!(dupes.allows(&Permission::EventsSubscribe(Some(vec!["a.".into()]))));
+    }
+
+    /// A grant wider than the request must not be refused for carrying a redundant entry.
+    #[test]
+    fn a_prefix_absorbs_the_entries_it_already_covers() {
+        // `["tool.", "tool.execute."]` admits exactly the topics `["tool."]` admits, so
+        // the two are one set. Before this, `allows` re-emitted the extension and the
+        // comparison failed against a grant that was strictly wider than the request.
+        let held = PermissionSet::new(vec![Permission::EventsSubscribe(Some(vec![
+            "tool.".into(),
+            "tool.execute.".into(),
+        ]))]);
+        assert!(held.allows(&Permission::EventsSubscribe(Some(vec!["tool.".into()]))));
+        assert!(held.allows(&Permission::EventsSubscribe(Some(vec![
+            "tool.execute.".into()
+        ]))));
+
+        // Absorption is for prefixes only. Hosts are exact strings.
+        let hosts = PermissionSet::new(vec![Permission::NetworkHttp(Some(vec![
+            "a.example".into(),
+            "a.example.net".into(),
+        ]))]);
+        assert!(hosts.allows(&Permission::NetworkHttp(Some(vec!["a.example.net".into()]))));
+        assert!(!hosts.allows(&Permission::NetworkHttp(Some(vec!["b.example".into()]))));
+    }
+
+    /// An empty topic list means "everything" to `topic_matches` and "nothing" to the
+    /// meet. It must not be usable as a grant while those two disagree.
+    #[test]
+    fn an_empty_scope_list_grants_nothing() {
+        let empty = Permission::EventsSubscribe(Some(Vec::new()));
+        assert!(!empty.is_well_formed());
+        assert_eq!(empty.meet(&Permission::EventsSubscribe(None)), None);
+
+        let set = PermissionSet::new(vec![empty.clone()]);
+        assert!(!set.allows(&Permission::EventsSubscribe(Some(vec!["tool.".into()]))));
+        assert!(!set.allows(&empty));
+
+        // And it is reachable, which is why the check is here and not only in the parser.
+        let parsed: Permission =
+            serde_json::from_str(r#"{"permission":"events_subscribe","scope":[]}"#)
+                .expect("the wire form is representable");
+        assert!(!parsed.is_well_formed());
     }
 
     /// Topic scopes are prefixes, so their meet is not the set intersection hosts get.

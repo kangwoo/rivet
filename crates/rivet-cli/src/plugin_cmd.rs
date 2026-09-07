@@ -194,9 +194,14 @@ fn effect(record: &PluginRecord, wanted: &Permission, profile: &str) -> String {
     if !record.permissions_computed {
         return "not evaluated (this plugin never passed validation)".to_string();
     }
-    if record.denied.contains(wanted) {
+    // Against the canonical form on both sides: `meet` returns scope lists sorted, while
+    // `wanted` is in the order the manifest author wrote. Comparing the two directly
+    // reported a permission granted in full as "narrowed by profile", which is the
+    // alarming direction for the command an operator audits with.
+    let wanted = wanted.canonicalised();
+    if record.denied.contains(&wanted) {
         format!("removed by profile `{profile}`")
-    } else if record.effective.contains(wanted) {
+    } else if record.effective.contains(&wanted) {
         "granted".to_string()
     } else {
         // Met, but not to what was asked for: the profile capped a wider request.
@@ -354,6 +359,29 @@ mod tests {
 
         let said = effect(&record, &Permission::FsRead(FsScope::Anywhere), "developer");
         assert_eq!(said, "narrowed by profile `developer`");
+    }
+
+    #[test]
+    fn a_scope_granted_in_full_is_not_reported_as_narrowed() {
+        // `meet` returns scope lists sorted; a manifest writes them in whatever order the
+        // author chose. Comparing the two directly made `plugin show` report a permission
+        // the profile granted whole as "narrowed by profile" -- a lie in the alarming
+        // direction, in the command an operator audits with.
+        for wanted in [
+            Permission::NetworkHttp(Some(vec!["b.example.com".into(), "a.example.com".into()])),
+            Permission::EventsSubscribe(Some(vec!["tool.".into(), "agent.run.".into()])),
+            Permission::SecretsRead(vec!["B_TOKEN".into(), "A_TOKEN".into()]),
+        ] {
+            let mut record = record_asking_for(vec![wanted.clone()]);
+            // What the loader stores: the meet against an unrestricted profile grant.
+            record.effective = PermissionSet::new([wanted.canonicalised()]);
+
+            assert_eq!(
+                effect(&record, &wanted, "developer"),
+                "granted",
+                "{wanted:?} was granted in full"
+            );
+        }
     }
 
     #[test]

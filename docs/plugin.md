@@ -126,12 +126,15 @@ scope      = ["tool.", "agent.run."]   # 생략 = 모든 토픽
 모든 토픽에 걸리므로 — 좁아 보이면서 전체를 주므로 — 파서가 거부한다.
 
 `readonly` · `reviewer` · `production`은 `agent.text`를 주지 않는다
-([`security.md` §8](./security.md)). 모델 출력 전문이 필요한 plugin이 그 프로파일에서
-그 토픽만 조용히 못 받는 것이 아니다 — `events_subscribe(["agent.text."])`를 선언했다면
-교집합이 비어 아래 관용구 (1)이 발동한다.
+([`security.md` §8](./security.md)). `events_subscribe(["agent.text."])`를 선언한 plugin은
+그 프로파일에서 교집합이 비므로 아래 관용구 (1)이 발동한다.
 
-`EventSubscriber::topics()`는 구독자 **자신의** 선호이고 기본값이 "전부"라 아무것도
-강제하지 않는다. 무엇을 받을 수 있는지는 이 grant만이 정한다.
+> **⚠ 다만 이 scope는 `fs_read`와 같은 자리에 있다 — 지금은 선언이지 강제가 아니다.**
+> `BroadcastBus::attach`는 `EventSubscriber::topics()`로 거르는데 그건 구독자 자신의
+> 선호이고, 기본값인 빈 목록은 "전부"로 읽힌다. 즉 scope를 좁게 선언해도 실제로는 모든
+> 토픽이 배달되고, `events_subscribe`를 선언하지 않은 plugin도 구독할 수 있다. 배선은
+> Phase 3(3.2)이다. 그때까지 좁은 scope를 적는 것은 **의도의 선언**이고, 관용구 (1)로
+> 스스로 확인하는 것은 여전히 유효하다.
 
 ---
 
