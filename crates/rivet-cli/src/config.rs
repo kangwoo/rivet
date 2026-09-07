@@ -166,23 +166,43 @@ pub enum Profile {
 }
 
 impl Profile {
+    /// Every profile, so a check can fold over the whole axis without a hand-written list.
+    ///
+    /// The security tests need this axis as much as they need every event family, and for
+    /// the same reason: a profile absent from the list is a profile whose grants no
+    /// assertion ever runs on, and the narrowed profiles are exactly the ones whose grants
+    /// matter. [`rivet_core::one_of_each`] is what stops the list falling behind the enum.
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        rivet_core::one_of_each!(Self {
+            Self::Developer => Self::Developer,
+            Self::ReadOnly => Self::ReadOnly,
+            Self::Reviewer => Self::Reviewer,
+            Self::Ci => Self::Ci,
+            Self::Production => Self::Production,
+        })
+    }
+
     /// Parse a profile name.
+    ///
+    /// The inverse of [`Profile::name`] by construction, rather than a second list that
+    /// has to agree with it — and the error names what [`Profile::all`] holds, so a new
+    /// profile is offered to the operator without a third list being edited.
     ///
     /// # Errors
     /// An unknown name fails at startup rather than quietly falling back to a permissive
     /// default, which is how a typo becomes a security incident.
     pub fn parse(name: &str) -> rivet_core::Result<Self> {
-        match name {
-            "developer" => Ok(Self::Developer),
-            "readonly" => Ok(Self::ReadOnly),
-            "reviewer" => Ok(Self::Reviewer),
-            "ci" => Ok(Self::Ci),
-            "production" => Ok(Self::Production),
-            other => Err(Error::invalid_argument(format!(
-                "unknown profile `{other}`; expected one of \
-                 developer, readonly, reviewer, ci, production"
-            ))),
-        }
+        Self::all()
+            .into_iter()
+            .find(|profile| profile.name() == name)
+            .ok_or_else(|| {
+                let known: Vec<&str> = Self::all().iter().map(|p| p.name()).collect();
+                Error::invalid_argument(format!(
+                    "unknown profile `{name}`; expected one of {}",
+                    known.join(", ")
+                ))
+            })
     }
 
     #[must_use]
@@ -558,6 +578,24 @@ fn selection(enabled: &[String]) -> rivet_core::Result<PluginSelection> {
 
 #[cfg(test)]
 mod tests {
+    /// Which side of the event grant a profile is on.
+    ///
+    /// The second axis these tests fold over, and it needed the same tripwire the topic
+    /// axis got: the two checks below used to name three profiles and two profiles in
+    /// hand-written lists, which between them happened to cover all five today and would
+    /// silently cover four of six tomorrow — a new profile's grants asserted by nothing.
+    /// This `match` has no wildcard, so a new profile fails to compile *at the decision*,
+    /// and both loops draw their profiles from [`super::Profile::all`], so it cannot be
+    /// answered here and then left out of the run.
+    fn is_narrowed(profile: super::Profile) -> bool {
+        match profile {
+            super::Profile::Developer | super::Profile::Ci => false,
+            super::Profile::ReadOnly | super::Profile::Reviewer | super::Profile::Production => {
+                true
+            }
+        }
+    }
+
     /// Adding a topic must not silently deny it to the narrowed profiles.
     ///
     /// The grant enumerates prefixes because prefixes cannot express "not `agent.text`",
@@ -624,14 +662,13 @@ mod tests {
         }
 
         // Both axes. Every family, because a new one falls outside the grant as silently
-        // as a new variant does; and all three profiles, because they share
+        // as a new variant does; and every narrowed profile, because they share
         // `subscribable_topics` today as an implementation detail rather than a promise --
         // the day one of them stops sharing it is the day this has to notice.
-        for profile in [
-            super::Profile::ReadOnly,
-            super::Profile::Reviewer,
-            super::Profile::Production,
-        ] {
+        for profile in super::Profile::all() {
+            if !is_narrowed(profile) {
+                continue;
+            }
             let granted = profile.permissions();
             for event in Event::one_of_each() {
                 let wanted = Permission::EventsSubscribe(Some(
@@ -660,30 +697,28 @@ mod tests {
             TopicScope::new(["tool.execute.".to_string()]).unwrap(),
         ));
 
-        for profile in [super::Profile::Developer, super::Profile::Ci] {
+        // One loop over the whole axis rather than a list per side: a profile can be on
+        // neither list only by not existing.
+        for profile in super::Profile::all() {
             let granted = profile.permissions();
-            assert!(
-                granted.allows(&text),
-                "{} must see everything",
-                profile.name()
-            );
-        }
-        for profile in [
-            super::Profile::ReadOnly,
-            super::Profile::Reviewer,
-            super::Profile::Production,
-        ] {
-            let granted = profile.permissions();
-            assert!(
-                !granted.allows(&text),
-                "{} must not receive the model's output",
-                profile.name()
-            );
-            assert!(
-                granted.allows(&lifecycle),
-                "{} still needs telemetry",
-                profile.name()
-            );
+            if is_narrowed(profile) {
+                assert!(
+                    !granted.allows(&text),
+                    "{} must not receive the model's output",
+                    profile.name()
+                );
+                assert!(
+                    granted.allows(&lifecycle),
+                    "{} still needs telemetry",
+                    profile.name()
+                );
+            } else {
+                assert!(
+                    granted.allows(&text),
+                    "{} must see everything",
+                    profile.name()
+                );
+            }
         }
     }
 
