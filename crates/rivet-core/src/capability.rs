@@ -178,6 +178,20 @@ impl FsScope {
 }
 
 impl Permission {
+    /// The same permission with every scope list sorted and deduplicated.
+    ///
+    /// Scope lists are sets, but they are carried as `Vec` and compared with `==`. This is
+    /// what keeps two spellings of one set from being two different permissions.
+    #[must_use]
+    pub fn canonicalised(&self) -> Self {
+        match self {
+            Self::NetworkHttp(Some(hosts)) => Self::NetworkHttp(Some(canonical(hosts))),
+            Self::EventsSubscribe(Some(topics)) => Self::EventsSubscribe(Some(canonical(topics))),
+            Self::SecretsRead(keys) => Self::SecretsRead(canonical(keys)),
+            other => other.clone(),
+        }
+    }
+
     /// The most permission both grants allow, or `None` when they overlap in nothing.
     ///
     /// This is what makes [`PermissionSet::intersect`] a real meet rather than an exact
@@ -253,7 +267,7 @@ enum HostMeet {
 fn meet_allowlist(a: Option<&[String]>, b: Option<&[String]>) -> HostMeet {
     match (a, b) {
         (None, None) => HostMeet::AnyHost,
-        (None, Some(list)) | (Some(list), None) => HostMeet::Hosts(list.to_vec()),
+        (None, Some(list)) | (Some(list), None) => HostMeet::Hosts(canonical(list)),
         (Some(x), Some(y)) => {
             let hosts = intersect_sorted(x, y);
             if hosts.is_empty() {
@@ -284,7 +298,7 @@ enum TopicMeet {
 fn meet_topics(a: Option<&[String]>, b: Option<&[String]>) -> TopicMeet {
     match (a, b) {
         (None, None) => TopicMeet::AllTopics,
-        (None, Some(list)) | (Some(list), None) => TopicMeet::Topics(list.to_vec()),
+        (None, Some(list)) | (Some(list), None) => TopicMeet::Topics(canonical(list)),
         (Some(x), Some(y)) => {
             let mut topics = Vec::new();
             for p in x {
@@ -305,6 +319,18 @@ fn meet_topics(a: Option<&[String]>, b: Option<&[String]>) -> TopicMeet {
             }
         }
     }
+}
+
+/// Sorted and deduplicated: the form every scope list is compared in.
+///
+/// A scope list is a *set*. Without a canonical form, `PermissionSet::allows` — which
+/// asks whether the meet equals what was wanted — refuses a grant identical to the one
+/// held, purely because the two spelled it in a different order.
+fn canonical(list: &[String]) -> Vec<String> {
+    let mut out = list.to_vec();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn intersect_sorted(a: &[String], b: &[String]) -> Vec<String> {
@@ -357,9 +383,12 @@ impl PermissionSet {
     /// `FsRead(Workspace)` allows `FsRead(Subtree("docs"))`, but not the reverse.
     #[must_use]
     pub fn allows(&self, wanted: &Permission) -> bool {
+        // Against the canonical form: `meet` returns scope lists sorted, so comparing
+        // with a caller's ordering would refuse a permission identical to one held.
+        let wanted = wanted.canonicalised();
         self.granted
             .iter()
-            .any(|held| held.meet(wanted).as_ref() == Some(wanted))
+            .any(|held| held.meet(&wanted).as_ref() == Some(&wanted))
     }
 
     /// Meet two grants. Used to narrow a plugin's manifest request by the active profile,
@@ -386,6 +415,41 @@ impl PermissionSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scope list is a set, so the order it was written in must not decide the answer.
+    ///
+    /// Found by probing `allows` with a grant identical to the one held: `meet` returns
+    /// scope lists sorted, so comparing against a caller's ordering refused it. The bug
+    /// predated topic scopes — `network_http` and `secrets_read` had it too — and the
+    /// documented manifest example `["tool.", "agent.run."]` hit it under any profile
+    /// whose own grant is a list.
+    #[test]
+    fn a_scope_list_is_a_set_whatever_order_it_was_written_in() {
+        let unsorted = vec!["b.".to_string(), "a.".to_string()];
+        let sorted = vec!["a.".to_string(), "b.".to_string()];
+
+        for (held, wanted) in [
+            (unsorted.clone(), unsorted.clone()),
+            (sorted.clone(), unsorted.clone()),
+            (unsorted.clone(), sorted.clone()),
+        ] {
+            let set = PermissionSet::new(vec![Permission::EventsSubscribe(Some(held))]);
+            assert!(set.allows(&Permission::EventsSubscribe(Some(wanted))));
+        }
+
+        // The variants that had the bug before topics existed.
+        let hosts = PermissionSet::new(vec![Permission::NetworkHttp(Some(unsorted.clone()))]);
+        assert!(hosts.allows(&Permission::NetworkHttp(Some(unsorted.clone()))));
+        let keys = PermissionSet::new(vec![Permission::SecretsRead(unsorted.clone())]);
+        assert!(keys.allows(&Permission::SecretsRead(unsorted)));
+
+        // And a duplicate is not a different set either.
+        let dupes = PermissionSet::new(vec![Permission::EventsSubscribe(Some(vec![
+            "a.".into(),
+            "a.".into(),
+        ]))]);
+        assert!(dupes.allows(&Permission::EventsSubscribe(Some(vec!["a.".into()]))));
+    }
 
     /// Topic scopes are prefixes, so their meet is not the set intersection hosts get.
     #[test]
