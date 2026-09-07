@@ -172,7 +172,7 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Which **promised** prefixes the grant removes.
+    /// Which **promised** prefixes the grant does not carry whole.
     ///
     /// Empty means every instruction the operator wrote survived. A non-empty result is
     /// always an error; the defaults are filtered out before this returns, because they
@@ -185,7 +185,19 @@ impl Settings {
             .collect()
     }
 
-    /// Which of `self.topics` the grant would remove, promised or not.
+    /// Which of `self.topics` the grant does not carry **whole**, promised or not.
+    ///
+    /// "Whole" is the load-bearing word, and it is not the same as "overlaps at all". A
+    /// prefix `p` survives the meet intact only if the grant holds a prefix `p` itself
+    /// starts with — anything *narrower* than `p` keeps a slice of it and drops the rest.
+    ///
+    /// The case that makes the difference concrete: `topics = ["agent."]` against a
+    /// narrowed profile, whose grant is `agent.request.`, `agent.run.`, `agent.turn.` and
+    /// four others. `meet_prefixes` unions, so the meet is those three — non-empty, so the
+    /// host's guard passes it, and `agent.text.` is gone without a word. An overlap test
+    /// calls that survival, because `agent.request.` does start with `agent.`; the module
+    /// doc's promise ("`load` fails and names what went missing") would then be false for
+    /// the one input it was written for.
     #[must_use]
     pub fn narrowed_by(&self, grant: &[Permission]) -> Vec<String> {
         let granted = match subscribable(grant) {
@@ -198,9 +210,10 @@ impl Settings {
         self.topics
             .iter()
             .filter(|wanted| {
-                !granted.as_slice().iter().any(|held| {
-                    wanted.starts_with(held.as_str()) || held.starts_with(wanted.as_str())
-                })
+                !granted
+                    .as_slice()
+                    .iter()
+                    .any(|held| wanted.starts_with(held.as_str()))
             })
             .cloned()
             .collect()
@@ -249,10 +262,10 @@ impl Plugin for TelemetryLogPlugin {
         let missing = settings.broken_promises(ctx.permissions.granted());
         if !missing.is_empty() {
             return Err(Error::plugin(format!(
-                "the active profile does not grant {missing:?}, which \
+                "the active profile does not grant {missing:?} in full, which \
                  `[plugins.\"{PLUGIN_ID}\"]` asked to log. Telemetry that quietly logs less \
-                 than it was told to is worse than none: remove those prefixes, or run \
-                 under a profile that grants them (`rivet plugin show {PLUGIN_ID}`)."
+                 than it was told to is worse than none: remove or narrow those prefixes, or \
+                 run under a profile that grants them (`rivet plugin show {PLUGIN_ID}`)."
             )));
         }
 
@@ -394,6 +407,42 @@ mod tests {
             TopicScope::new(["tool.".to_string(), "agent.run.".to_string()]).unwrap(),
         ))];
         assert_eq!(settings.broken_promises(&narrowed), [CONVERSATION_TOPIC]);
+    }
+
+    #[test]
+    fn a_prefix_the_grant_only_partly_covers_counts_as_narrowed() {
+        // The input the overlap test got wrong. `agent.` against a narrowed profile keeps
+        // `agent.request.`, `agent.run.` and `agent.turn.` and loses `agent.text.`, so the
+        // meet is non-empty and the host's guard -- whose job is to refuse an *empty* meet
+        // -- waves it through. If this plugin also called that survival, the module doc's
+        // promise would be false for the one case it exists to catch.
+        let grant = [Permission::EventsSubscribe(Some(
+            TopicScope::new(
+                ["agent.request.", "agent.run.", "agent.turn.", "tool."]
+                    .iter()
+                    .map(|t| (*t).to_string()),
+            )
+            .unwrap(),
+        ))];
+        let settings = Settings::from_config(&serde_json::json!({"topics": ["agent."]})).unwrap();
+        assert_eq!(settings.narrowed_by(&grant), ["agent."]);
+        assert_eq!(
+            settings.broken_promises(&grant),
+            ["agent."],
+            "a written prefix the grant only half-carries has to fail the load"
+        );
+    }
+
+    #[test]
+    fn a_grant_wider_than_what_was_written_keeps_the_promise() {
+        // The other direction, and the one that must *not* become an error: asking for
+        // `tool.execute.` under a grant of `tool.` loses nothing.
+        let grant = [Permission::EventsSubscribe(Some(
+            TopicScope::new(["tool.".to_string()]).unwrap(),
+        ))];
+        let settings =
+            Settings::from_config(&serde_json::json!({"topics": ["tool.execute."]})).unwrap();
+        assert!(settings.broken_promises(&grant).is_empty());
     }
 
     #[test]

@@ -198,6 +198,12 @@ api_key_env = "DEEPSEEK_API_KEY"
 사라짐"이 된다. 호스트의 guard는 빈 meet만 거절하므로 이 경우를 못 잡는다. 잡는 것은 plugin
 자신이고, 운영자가 *적어 넣은* 것이 말없이 사라지지 않게 하는 것이 이 규칙의 전부다.
 
+"좁힌다"는 **일부만 좁히는 것도 포함한다.** 적어 넣은 접두사가 온전히 살아남으려면 grant가
+그 접두사를 통째로 덮어야 한다 — 더 좁은 것을 주는 grant는 그 접두사의 *일부*만 남긴다.
+좁은 프로파일에서 `topics = ["agent."]`가 그 경우다: `agent.request.` · `agent.run.` ·
+`agent.turn.`만 남고 `agent.text.`가 사라지므로, "겹치기는 한다"가 아니라 **로드 실패**다.
+반대 방향(`topics = ["tool.execute."]`에 `tool.` grant)은 잃는 것이 없으므로 통과한다.
+
 이 plugin은 `fs_write`도 `network_http`도 요청하지 않는다. 목적지는 호스트의 `tracing`
 sink이고, 그것을 고르는 것은 운영자다 — `RUST_LOG`, `RIVET_LOG_FORMAT`, 리다이렉션.
 

@@ -117,12 +117,18 @@ impl Observer {
     /// should say so rather than let a consumer believe it read the whole stream.
     pub async fn drain_within(mut self, budget: Duration) -> Drained {
         self.stop.cancel();
-        let Some(handle) = self.handle.take() else {
+        let Some(mut handle) = self.handle.take() else {
             return Drained::Complete;
         };
-        if tokio::time::timeout(budget, handle).await.is_ok() {
+        // `&mut handle` rather than `handle`: a timeout that consumed it would *detach* the
+        // pump, not stop it. `Drop` cannot pick that up either -- `take` has already emptied
+        // the field -- so the task would go on holding a receiver and delivering into a
+        // renderer nobody is reading. In the CLI the process exits a moment later and it
+        // does not show; an embedder that drains once per run leaks one task per truncation.
+        if tokio::time::timeout(budget, &mut handle).await.is_ok() {
             Drained::Complete
         } else {
+            handle.abort();
             Drained::Truncated {
                 budget_ms: u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
             }
@@ -431,6 +437,52 @@ mod tests {
             .drain_within(std::time::Duration::from_millis(50))
             .await;
         assert_eq!(drained, Drained::Truncated { budget_ms: 50 });
+    }
+
+    #[tokio::test]
+    async fn a_drain_that_runs_out_of_budget_still_ends_the_pump() {
+        // A timeout that *consumed* the handle would detach the task rather than stop it,
+        // and `Drop` cannot clean up after that -- `drain_within` has already taken the
+        // handle out. The pump would keep its receiver and keep delivering into a renderer
+        // whose caller has moved on. Held by the subscriber's own refcount: the pump owns
+        // the only other `Arc`, so it falling back to one means the task is gone.
+        #[derive(Debug)]
+        struct Wedged;
+
+        #[async_trait::async_trait]
+        impl EventSubscriber for Wedged {
+            fn name(&self) -> &'static str {
+                "wedged"
+            }
+
+            async fn on_event(&self, _envelope: &EventEnvelope) {
+                std::future::pending::<()>().await;
+            }
+        }
+
+        let bus = BroadcastBus::new();
+        let subscriber = Arc::new(Wedged);
+        let observer = bus.observe(subscriber.clone());
+        bus.publish(tool_event());
+        assert_eq!(
+            observer
+                .drain_within(std::time::Duration::from_millis(50))
+                .await,
+            Drained::Truncated { budget_ms: 50 }
+        );
+
+        // `abort` schedules the drop rather than performing it, so this waits for it.
+        for _ in 0..200 {
+            if Arc::strong_count(&subscriber) == 1 && bus.subscriber_count() == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        panic!(
+            "the truncated pump was detached, not stopped: {} refs, {} receivers",
+            Arc::strong_count(&subscriber),
+            bus.subscriber_count()
+        );
     }
 
     #[tokio::test]

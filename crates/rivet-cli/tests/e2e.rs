@@ -490,6 +490,60 @@ fn topic_of(event: &serde_json::Value) -> Option<String> {
     })
 }
 
+/// The stream has to carry the failure, not just the exit code.
+///
+/// Nothing asserted this: every other `--jsonl` test runs a successful run, and the failing
+/// path is the one an operator actually reads the stream for. `catalog::load` publishes the
+/// discoveries, the refusal, and the rollback's `plugin.unloaded` lines, and only then
+/// returns `Err`.
+///
+/// Worth being exact about what this does and does not catch. Before `Watching::finish`,
+/// that `Err` left `start` through a `?` and `Watching` was dropped — reaching
+/// [`rivet_runtime::Observer`]'s `Drop`, which **aborts** the pump instead of draining it.
+/// The lines still arrived, every time, on every machine tried: `unload_all` awaits between
+/// the last publish and the drop, and a multi-threaded runtime hands the pump a worker long
+/// before then. So this test passes either way, and it is not a regression test for that
+/// abort. What it pins is the property — the stream ends where the run does — which used to
+/// hold by scheduler luck and now holds by construction, the same trade `drain_within` made
+/// against `sleep(20 ms); abort()`.
+#[tokio::test]
+async fn jsonl_carries_a_failed_plugin_load_and_not_just_the_exit_code() {
+    let provider = Provider::start(vec![sse_text("unused")]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    enable_telemetry(&workspace);
+    // A written `topics` list is a promise, and `agent.text.` is exactly what a narrowed
+    // profile withholds -- so this plugin refuses to load rather than log less than it was
+    // told to. Any load failure would do; this is the one Phase 3 shipped.
+    let path = workspace.path().join("rivet.toml");
+    let config = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!("{config}\n[plugins.\"rivet.telemetry-log\"]\ntopics = [\"agent.text.\"]\n"),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = workspace
+        .run(&["--jsonl", "--profile", "readonly", "say hello"])
+        .await;
+    assert_ne!(code, 0, "a plugin refused to load, so the run has to fail");
+
+    let topics: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|value| topic_of(&value))
+        .collect();
+    assert!(
+        topics.iter().any(|t| t == "plugin.load.failed"),
+        "the stream is missing the one line that explains the exit: \
+         {topics:?} (stderr: {stderr})"
+    );
+    assert!(
+        topics.iter().any(|t| t == "plugin.unloaded"),
+        "the rollback is the tail of this stream, and the last thing published before the \
+         error leaves: {topics:?}"
+    );
+}
+
 #[tokio::test]
 async fn tui_refuses_a_pipe() {
     // Raw mode on a pipe leaves no terminal to put back, and the symptom shows up later as

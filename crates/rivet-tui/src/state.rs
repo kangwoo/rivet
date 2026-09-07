@@ -14,7 +14,11 @@ use std::collections::BTreeMap;
 use rivet_core::event::ToolEvent;
 use rivet_core::event::{AgentEvent, Event, EventEnvelope, JobEvent, PluginEvent, RuntimeEvent};
 
-/// How many streamed characters the agent panel keeps.
+/// How many **bytes** of streamed text the agent panel keeps.
+///
+/// Bytes, because what the cap is for is bounding memory, and a character is between one
+/// and four of them. What the panel *reports* dropping is characters — see
+/// [`RunView::text_dropped`], which is the number a reader can act on.
 const TEXT_LIMIT: usize = 8_192;
 
 /// How many tool call lines the agent panel keeps.
@@ -302,20 +306,23 @@ impl AppState {
     }
 
     /// Append streamed text, dropping from the front when it grows past the cap.
+    ///
+    /// The cap is in bytes and the report is in characters, and the two are only equal for
+    /// ASCII. `cut` is a byte offset, so the characters it covers are counted rather than
+    /// assumed — the same reason the boundary search above it exists. Adding `cut` straight
+    /// into `text_dropped` overstates the elision by up to 4× on CJK or emoji output, in a
+    /// line the panel renders as "… N character(s) elided".
     fn push_text(&mut self, text: &str) {
         self.run.text.push_str(text);
         if self.run.text.len() > TEXT_LIMIT {
             let excess = self.run.text.len() - TEXT_LIMIT;
             // Trim to a character boundary: model output is not ASCII.
-            let cut = self
-                .run
-                .text
-                .char_indices()
-                .map(|(index, _)| index)
-                .find(|index| *index >= excess)
-                .unwrap_or(self.run.text.len());
+            let mut cut = excess;
+            while cut < self.run.text.len() && !self.run.text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.run.text_dropped += self.run.text[..cut].chars().count();
             self.run.text.drain(..cut);
-            self.run.text_dropped += cut;
         }
     }
 
@@ -396,6 +403,28 @@ mod tests {
         }
         assert!(state.run.text.len() <= TEXT_LIMIT);
         assert!(state.run.text_dropped > 0, "a silent drop is a lie");
+    }
+
+    #[test]
+    fn what_it_says_it_dropped_is_characters_not_bytes() {
+        // `draw.rs` renders this as "… N character(s) elided", and the cap is in bytes.
+        // Counting the bytes instead would tell a reader of Korean or emoji output that
+        // three times as much went missing as actually did.
+        let mut state = AppState::default();
+        // One three-byte character per delta, well past the cap.
+        let delta = "가".repeat(1_000);
+        for _ in 0..10 {
+            state.apply(&envelope(Event::Agent(AgentEvent::TextDelta {
+                text: delta.clone(),
+            })));
+        }
+
+        let kept = state.run.text.chars().count();
+        assert_eq!(
+            state.run.text_dropped + kept,
+            10_000,
+            "every character is either still on screen or counted as elided"
+        );
     }
 
     #[test]
