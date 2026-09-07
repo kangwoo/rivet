@@ -5,6 +5,7 @@
 //! so that a plugin loaded over RPC or WASM can be rejected *before* it registers
 //! anything, rather than failing mid-run.
 
+use std::cmp::Ordering;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -94,19 +95,23 @@ impl StringSet {
     ///
     /// # Errors
     /// [`crate::error::ErrorKind::InvalidArgument`] for an empty set or an empty member.
-    /// An empty allowlist grants nothing, which is never what a manifest means.
+    /// An empty allowlist admits nothing, so it can only be a mistake.
     ///
-    /// The message does not say "leave the scope out instead": that is the fix for
-    /// `network_http`, and the *opposite* of the fix for `secrets_read`, which has no
-    /// unscoped form at all. This constructor cannot tell which one it is holding, and
-    /// advice that is wrong for half its callers is worse than none.
+    /// Neither message names a permission or a remedy, and both omissions are deliberate.
+    /// A remedy would have to be "leave the scope out instead", which is the fix for
+    /// `network_http` and the *opposite* of the fix for `secrets_read`, which has no
+    /// unscoped form at all; this constructor cannot tell which it is holding. A
+    /// permission name it does not have either — so a manifest author never reads these
+    /// words. `rivet-plugin`'s parser answers first, with the name and the remedy, and
+    /// these are for the callers that reach the constructor directly: `Deserialize`, which
+    /// is the door Phase 6 comes in by, and in-tree construction.
     pub fn new(items: impl IntoIterator<Item = String>) -> crate::Result<Self> {
         let mut out: Vec<String> = items.into_iter().collect();
         out.sort();
         out.dedup();
         if out.is_empty() {
             return Err(crate::Error::invalid_argument(
-                "an empty scope list grants nothing, which is never what a manifest means",
+                "a scope list cannot be empty: an empty allowlist admits nothing",
             ));
         }
         if out.iter().any(String::is_empty) {
@@ -245,6 +250,30 @@ impl<'de> Deserialize<'de> for TopicScope {
     }
 }
 
+impl<'de> Deserialize<'de> for FsScope {
+    /// Through [`FsScope::subtree`], like every other scope goes through its constructor.
+    ///
+    /// The derive did not, and that was the one exception to "the check is in the
+    /// constructor, so it survives every door in": `{"subtree": "../../../etc"}` arrived
+    /// intact, and while [`FsScope::meet`] refused it — so it could never be *granted* —
+    /// [`PermissionSet::contains`] answered `true` for it. The shape below is the derive's
+    /// own; only the `Subtree` arm gains a check.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Raw {
+            Subtree(String),
+            Workspace,
+            Anywhere,
+        }
+        match Raw::deserialize(d)? {
+            Raw::Subtree(path) => Self::subtree(path).map_err(serde::de::Error::custom),
+            Raw::Workspace => Ok(Self::Workspace),
+            Raw::Anywhere => Ok(Self::Anywhere),
+        }
+    }
+}
+
 /// A permission a plugin may request in its manifest and a sandbox may enforce.
 ///
 /// The permission set is a *closed vocabulary* on purpose. If a plugin needs something
@@ -283,7 +312,7 @@ pub enum Permission {
 /// Where filesystem access is allowed.
 ///
 /// Ordered by reach: `Subtree ⊑ Workspace ⊑ Anywhere`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsScope {
     /// A specific subtree, relative to the workspace root.
@@ -315,8 +344,11 @@ impl FsScope {
 
     /// Whether this scope is safe to grant.
     ///
-    /// Checked in [`FsScope::meet`] as well as at construction, because `Subtree` can also
-    /// arrive by deserializing a manifest that never went through the constructor.
+    /// Checked in [`FsScope::meet`] as well as at construction. `Deserialize` now routes
+    /// through [`FsScope::subtree`] too, so this is defence in depth rather than the only
+    /// guard — which is what it was, and it did not hold the door: a grant deserialized
+    /// straight into [`FsScope::Subtree`] was refused by `meet` and `allows` but still
+    /// answered [`PermissionSet::contains`].
     #[must_use]
     pub fn is_valid(&self) -> bool {
         match self {
@@ -464,11 +496,27 @@ fn meet_prefixes(a: &[String], b: &[String]) -> Vec<String> {
 
 /// The exact strings both sides name.
 ///
-/// Both operands come from a [`StringSet`], so they arrive sorted and deduplicated and a
-/// filtered subsequence of `a` is too: the result needs no sort of its own, and
-/// [`StringSet::from_unsorted`] would redo one anyway.
+/// Both operands come from a [`StringSet`], so they arrive sorted and deduplicated. That
+/// is what the name claims and what this walk spends: two cursors over two sorted lists,
+/// `O(n + m)`, where the obvious `a.iter().filter(|k| b.contains(k))` rescans `b` per
+/// element for `O(n · m)`. The result is a subsequence of `a` and so is sorted and
+/// deduplicated too — [`StringSet::from_unsorted`] re-canonicalises it anyway, because
+/// trusting a caller is the thing that type exists to not do.
 fn intersect_sorted(a: &[String], b: &[String]) -> Vec<String> {
-    a.iter().filter(|k| b.contains(k)).cloned().collect()
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+            Ordering::Equal => {
+                out.push(a[i].clone());
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out
 }
 
 /// The set of permissions actually granted to a running unit of work.
@@ -700,13 +748,17 @@ mod tests {
         // `Permission` is adjacently tagged, so the scope is deserialized as the *content*
         // of a variant; the refusal has to survive that, and an absent `scope` still has to
         // mean "all". This is what the check being in the constructor buys, so it is what
-        // the test has to hold.
+        // the test has to hold -- for **every** scope-carrying permission, which is why
+        // both empty shapes are listed for all three lists and `fs_read` is here too.
         for wire in [
             r#"{"permission":"events_subscribe","scope":[]}"#,
             r#"{"permission":"events_subscribe","scope":[""]}"#,
             r#"{"permission":"network_http","scope":[]}"#,
             r#"{"permission":"network_http","scope":[""]}"#,
             r#"{"permission":"secrets_read","scope":[]}"#,
+            r#"{"permission":"secrets_read","scope":[""]}"#,
+            r#"{"permission":"fs_read","scope":{"subtree":"../../../etc"}}"#,
+            r#"{"permission":"fs_write","scope":{"subtree":"/etc"}}"#,
         ] {
             assert!(
                 serde_json::from_str::<Permission>(wire).is_err(),
@@ -718,6 +770,63 @@ mod tests {
             Permission::EventsSubscribe(None),
             "an absent scope is still the widest grant"
         );
+        // The scopes that are *fine* still arrive, or the loop above would pass by
+        // rejecting everything.
+        assert_eq!(
+            serde_json::from_str::<Permission>(r#"{"permission":"fs_read","scope":"workspace"}"#)
+                .unwrap(),
+            Permission::FsRead(FsScope::Workspace)
+        );
+        assert_eq!(
+            serde_json::from_str::<Permission>(
+                r#"{"permission":"fs_read","scope":{"subtree":"docs/api"}}"#
+            )
+            .unwrap(),
+            Permission::FsRead(FsScope::Subtree("docs/api".into()))
+        );
+    }
+
+    /// The gap `fs_read` had until its `Deserialize` went through the constructor.
+    ///
+    /// `meet` and `allows` consult [`FsScope::is_valid`], so an escaping subtree could
+    /// never be *granted*; but `contains` is a plain equality lookup over the held list,
+    /// and it answered `true` for a value that only ever existed because the derive let it
+    /// in. Recorded as a test rather than a comment because "the constructor is the only
+    /// door" is the property the whole scope design rests on, and it was false here.
+    #[test]
+    fn an_escaping_subtree_cannot_enter_through_deserialize() {
+        assert!(FsScope::subtree("../../../etc").is_err());
+        assert!(serde_json::from_str::<FsScope>(r#"{"subtree":"../../../etc"}"#).is_err());
+
+        // The value the derive used to admit is still refused everywhere downstream, so
+        // the two layers agree rather than one covering for the other.
+        let escaping = FsScope::Subtree("../../../etc".into());
+        assert!(!escaping.is_valid());
+        let wanted = Permission::FsRead(escaping);
+        assert_eq!(wanted.meet(&Permission::FsRead(FsScope::Workspace)), None);
+        assert!(!PermissionSet::new([Permission::FsRead(FsScope::Workspace)]).allows(&wanted));
+    }
+
+    /// `FsScope` writes its two halves separately now, so they have to be held together.
+    ///
+    /// `Serialize` is still derived and `Deserialize` is hand-written, which is exactly the
+    /// shape that drifts: rename a variant and the wire form changes on one side only. The
+    /// hand-written half mirrors the derive's `snake_case` tagging, and this is what says
+    /// so.
+    #[test]
+    fn every_fs_scope_survives_a_round_trip() {
+        for scope in [
+            FsScope::Workspace,
+            FsScope::Anywhere,
+            FsScope::Subtree("docs/api".into()),
+        ] {
+            let wire = serde_json::to_string(&scope).unwrap();
+            assert_eq!(
+                serde_json::from_str::<FsScope>(&wire).unwrap(),
+                scope,
+                "`{wire}` did not round-trip"
+            );
+        }
     }
 
     /// Topic scopes are prefixes, so their meet is not the set intersection hosts get.

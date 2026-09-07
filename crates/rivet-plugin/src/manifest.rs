@@ -153,10 +153,17 @@ fn permission_from_raw(
 
 /// A topic-prefix allowlist.
 ///
-/// Only the *empty list* is refused here, and only because [`host_list`] would otherwise
-/// beat this function to it with a message about hosts. An empty prefix is refused one
-/// level down, by `TopicScope::new`, which gives the topic reason too — repeating the
-/// check here would be a second place to keep in step for no second answer.
+/// Neither branch below is the *check*. `TopicScope::new` refuses both shapes one level
+/// down and is what makes them unconstructible; these are the messages, and they are here
+/// because this is the only layer that can write a useful one. The constructor knows the
+/// topic reason but not which permission it is validating, so it can name the problem and
+/// not the remedy — and the remedy is the actionable half: "leave `scope` out" is right
+/// for `events_subscribe` and wrong for `secrets_read`, which has no unscoped form.
+/// `topic_list` has one caller and one permission, so it can say it.
+///
+/// That is the split, and it is why this is not the duplicated check the constructor move
+/// removed: one enforcement, in one place, with the message written where the context to
+/// write it exists.
 fn topic_list(
     name: &str,
     value: &toml::Value,
@@ -165,16 +172,28 @@ fn topic_list(
     // `host_list` rejects an empty list too, but for the opposite reason: for hosts an
     // empty allowlist grants nothing, while an empty *topic* filter is read by
     // `topic_matches` as every topic. Same refusal, and the message it carries is about
-    // hosts, so say the topic reason here.
-    let value_is_empty = matches!(value, toml::Value::Array(items) if items.is_empty());
-    if value_is_empty {
-        return Err(bad(
-            origin,
-            format!(
-                "permission `{name}` has an empty `scope`; an empty topic filter matches \
-                 every topic, so leave `scope` out to ask for all of them"
-            ),
-        ));
+    // hosts, so say the topic reason here — and reach it first.
+    if let toml::Value::Array(items) = value {
+        if items.is_empty() {
+            return Err(bad(
+                origin,
+                format!(
+                    "permission `{name}` has an empty `scope`; an empty topic filter matches \
+                     every topic, so leave `scope` out to ask for all of them"
+                ),
+            ));
+        }
+        // The same answer for the same reason, one shape further in — and the branch
+        // above would otherwise be the only one of the two that named a remedy.
+        if items.iter().any(|item| item.as_str() == Some("")) {
+            return Err(bad(
+                origin,
+                format!(
+                    "permission `{name}` has an empty topic prefix in its `scope`; an empty \
+                     prefix matches every topic, so it grants what leaving `scope` out grants"
+                ),
+            ));
+        }
     }
     host_list(name, value, origin)
 }

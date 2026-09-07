@@ -87,6 +87,8 @@ major `0`은 Cargo와 같이 **모든 minor 변경을 breaking으로** 취급한
 | `network_http` | 없음 | 모든 호스트 |
 | `network_http` | `["api.openai.com"]` | 허용 목록 (빈 배열은 에러) |
 | `secrets_read` | `["DEEPSEEK_API_KEY"]` | 필수, 비어 있을 수 없음 |
+| `events_subscribe` | 없음 | 모든 토픽 |
+| `events_subscribe` | `["tool.", "agent.run."]` | 토픽 **접두사** 허용 목록 ([아래](#events_subscribe의-scope)) |
 | 나머지 전부 | 없음 | `scope`를 적으면 에러 |
 
 목록형 `scope`(`network_http` · `secrets_read` · `events_subscribe`)는 **집합**이다.
@@ -94,9 +96,11 @@ major `0`은 Cargo와 같이 **모든 minor 변경을 breaking으로** 취급한
 않고, `rivet plugin show`도 그 정규형으로 찍는다. 빈 배열뿐 아니라 **빈 항목**(`[""]`)도
 에러다 — 호스트·키에서는 아무것도 가리키지 않고, 토픽에서는 전부에 걸린다(아래 참조).
 
-`{ subtree = "../../../etc" }`처럼 워크스페이스를 벗어나는 하위 트리는 **파싱 시점에**
-거부된다. 나중에 meet에서 조용히 사라지게 두면, 매니페스트가 잘못됐다는 사실 대신 권한이
-0개인 채로 로드된 plugin이 남는다.
+이 검사들은 전부 **생성자**에 있고, `scope`가 들어오는 문은 그 생성자 하나뿐이다. TOML
+파서든 `Deserialize`든 같은 곳을 지나므로 파서를 우회해 만들어진 권한은 없다.
+`{ subtree = "../../../etc" }`처럼 워크스페이스를 벗어나는 하위 트리가 **파싱 시점에**
+거부되는 것도 같은 이유다 — 나중에 meet에서 조용히 사라지게 두면, 매니페스트가 잘못됐다는
+사실 대신 권한이 0개인 채로 로드된 plugin이 남는다.
 
 ### 2.3 선언하지 않은 슬롯에는 등록할 수 없다
 
@@ -133,12 +137,11 @@ scope      = ["tool.", "agent.run."]   # 생략 = 모든 토픽
 `tool.`을 주고 매니페스트가 `tool.execute.`를 요청하면 결과는 `tool.execute.`이지
 `tool.`이 아니다. `tool.`과 `run.`은 공통 토픽이 없으므로 권한이 0개가 된다.
 
-scope 목록은 **집합**이다. `TopicScope`(토픽)와 `StringSet`(호스트·시크릿 키)이 생성
-시점에 정렬·중복 제거하고, 토픽은 다른 항목이 이미 덮는 접두사까지 흡수한다. 그래서
-`["tool.", "tool.execute."]`와 `["tool."]`은 **같은 값**이고, 적은 순서가 판정을 바꾸지
-않는다. 빈 목록과 빈 접두사는 생성자가 거부한다 — 빈 접두사는 모든 토픽에 걸려서 좁아
-보이면서 전체를 주고, 빈 목록은 meet에는 "겹침 없음"이고 `topic_matches`에는 "전부"라
-양끝이 반대로 읽힌다. `Deserialize`도 같은 생성자를 지난다.
+토픽 scope는 §2.2의 집합 규칙에 **흡수**가 하나 더 붙는다. 다른 항목이 이미 덮는 접두사는
+아무 토픽도 따로 받지 못하므로 사라진다 — `["tool.", "tool.execute."]`와 `["tool."]`은
+**같은 값**이다. 빈 항목이 §2.2에서 에러인 이유도 토픽 쪽이 더 무겁다: 빈 접두사는 모든
+토픽에 걸려 좁아 보이면서 전체를 주고, 빈 목록은 meet에는 "겹침 없음"이고
+`topic_matches`에는 "전부"라 양끝이 반대로 읽힌다.
 
 `readonly` · `reviewer` · `production`은 `agent.text`를 주지 않는다
 ([`security.md` §8](./security.md)). `events_subscribe(["agent.text."])`를 선언한 plugin은
