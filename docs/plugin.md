@@ -224,6 +224,16 @@ async fn load(&self, ctx: PluginContext) -> Result<PluginHandle> {
 `Plugin::unload`를 부르므로, teardown 중의 등록은 정리를 지나쳐 살아남아 **자기 자신의
 재로드를 영구히 막는다.**
 
+**`load`가 반환되는 것과 *동시에* 도착한 등록은 동전 던지기다.** 창구는 `load`가 반환된
+직후에 닫히므로, 그 직전에 띄운 태스크의 등록은 봉인을 앞지를 수도, 봉인에 걸릴 수도
+있다 — 리뷰 3라운드가 같은 plugin으로 25번 돌려 64건 중 13~64건이 통과하는 것을 측정했다.
+어느 쪽이 되든 **회계는 어긋나지 않는다**: 통과하면 레지스트리와 `record.registered`에
+함께 들어가고, 걸리면 어느 쪽에도 안 들어간다. 어긋나는 것은 `PluginHandle`이다. 핸들은
+`load`가 반환될 때 고정되므로, 창구를 통과한 등록 하나가 핸들에 없으면
+`claim_matches_reality()`가 false가 되고 `rivet doctor`가 "reported" 경고를 낸다. **같은
+설정으로 `rivet doctor`를 두 번 돌렸는데 한 번만 경고가 뜬다면 이 경우다** — 무작위가
+아니라 태스크에서 등록하는 plugin이 있다는 뜻이고, 고칠 곳은 타이밍이 아니라 그 태스크다.
+
 ### 4.2 권한은 넓힐 수 없다
 
 ```text
