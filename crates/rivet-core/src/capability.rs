@@ -178,10 +178,6 @@ impl FsScope {
 }
 
 impl Permission {
-    /// The same permission with every scope list sorted and deduplicated.
-    ///
-    /// Scope lists are sets, but they are carried as `Vec` and compared with `==`. This is
-    /// what keeps two spellings of one set from being two different permissions.
     /// Whether this permission is well-formed enough to be a grant.
     ///
     /// `EventsSubscribe(Some([]))` is spellable through `Deserialize` and means opposite
@@ -202,6 +198,11 @@ impl Permission {
         }
     }
 
+    /// The same permission with every scope list sorted, deduplicated, and — for topic
+    /// prefixes — stripped of entries another entry already covers.
+    ///
+    /// Scope lists are sets carried as `Vec` and compared with `==`. This is what keeps
+    /// two spellings of one set from being two different permissions.
     #[must_use]
     pub fn canonicalised(&self) -> Self {
         match self {

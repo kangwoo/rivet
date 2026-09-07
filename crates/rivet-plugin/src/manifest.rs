@@ -417,6 +417,24 @@ permission = "job_manage"
     }
 
     #[test]
+    fn an_empty_topic_scope_is_refused_for_the_topic_reason() {
+        // `host_list` also rejects an empty list, but its message says an empty allowlist
+        // "grants nothing" -- for topics an empty filter grants *everything*, the exact
+        // inversion. Without this the block saying so can be deleted and every test still
+        // passes.
+        let err = with(
+            "[[permissions]]\n\
+             permission = \"events_subscribe\"\n\
+             scope = []\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("matches every topic"),
+            "the message must give the topic reason, not the host one: {err}"
+        );
+    }
+
+    #[test]
     fn an_empty_topic_prefix_is_refused() {
         // `""` matches every topic, so a manifest spelling it would look narrow and behave
         // like leaving `scope` out entirely.
