@@ -739,17 +739,35 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    이 권한을 거치지 않는다. 호스트는 plugin이 아니고, 그 둘을 무엇이 제약하는지는
    프로파일이 아니라 CLI를 실행한 사람이다.
 
-   **셋째로, 이 scope는 아직 강제되지 않는다 — 어휘와 grant만 정했다.** 배달 경로가
-   grant를 읽지 않는다: `BroadcastBus::attach`는 `EventSubscriber::topics()`로 거르고,
-   그건 구독자 자신의 선호이며 빈 목록이 "전부"로 읽힌다. 그래서 `["tool."]`만 가진
-   plugin도 `agent.text.delta`를 받고, `events_subscribe`를 선언하지 않은 plugin도
-   구독할 수 있다. `fs_read`(§11-13)와 정확히 같은 자리다.
+   **셋째, 이 scope의 강제는 Phase 3에서 닫혔다 (2026-09-07).** 배달 경로가 grant를
+   읽는다. 강제는 `rivet-plugin`의 `GuardedRegistry::register_subscriber`에 있다 —
+   `ctx.permissions`가 이미 거기 있고 `capabilities` 검사도 이미 거기 있으며,
+   `Registry::scoped`에 grant 인자를 더하는 것은 모든 embedder에 대해 Phase 0 계약을
+   바꾸는 일이라(Phase 2가 declared-kinds에 대해 같은 이유로 거절했다) 레지스트리로
+   내리지 않았다. 등록 경로(`attach_subscriber`) 자체는 런타임에 남는다.
 
-   배선은 **Phase 3**이고 이음매는 `attach_subscriber`다 — 빈 `topics()`가 "전부"가
-   아니라 grant의 목록이 되어야 하고, `events_subscribe` 없는 plugin은 구독자를 등록할
-   수 없어야 한다. 어휘를 Phase 3보다 **먼저** 정한 이유가 이것이다: 3.2가
-   "`EventSubscriber` 등록 + 토픽 필터"인데, 맨몸 permission 위에 그것을 지으면 나중에
-   scope를 넣는 비용이 훨씬 커진다. 근거: PR #2 리뷰 blocking 1.
+   닫은 것 셋: 빈 `topics()`는 "전부"가 아니라 grant의 목록이고
+   (`an_empty_topics_list_becomes_the_grant_not_everything`), `events_subscribe` 없는
+   plugin은 구독자를 등록할 수 없고
+   (`a_plugin_without_events_subscribe_cannot_register_a_subscriber`), grant와 겹치지
+   않는 `topics()`는 `Err`다 (`a_subscriber_whose_topics_fall_outside_its_grant_is_refused`).
+   §11-10을 닫는 테스트는 `a_readonly_profile_keeps_the_conversation_from_a_subscriber`이고,
+   구독자 목록은 `grant ⊓ topics()`를 `Permission::meet`으로 — 새 헬퍼가 아니라 `manifest ∩
+   profile`이 쓰는 그 함수로 — 계산한다.
+
+   **패밀리 구멍도 같이 닫혔다.** 위에서 "목록이 닫히는 쪽으로 실패한다"고 적은 대가는
+   조용했다 — 새 토픽 패밀리가 일곱 접두사 어디에도 안 걸리고 아무것도 실패하지 않았다.
+   `Event::one_of_each()` 위의 **와일드카드 없는 두 층 `match`** 둘이 그 자리를 대신한다:
+   `every_topic_is_granted_or_deliberately_withheld`(`rivet-cli`)와
+   `every_bus_topic_is_claimed`(`rivet-runtime`). 패밀리든 변형이든, 새로 생기면 둘 다
+   컴파일에 실패한다.
+
+   **남은 것: `events_publish`는 여전히 강제되지 않는다.** `ctx.events`가 grant와 무관하게
+   통째로 넘어가므로 plugin이 위조 `agent.*`를 발행할 수 있다. 모든 프로파일이 이 권한을
+   주므로 오늘은 아무것도 안 터진다. 한 줄로 막을 수는 있지만(권한이 없으면 널 버스를
+   넘긴다) 조용히 아무 일도 안 하는 버스는 에러보다 나쁘고, 진짜 답은 발행자를 envelope에
+   스탬프하는 것이며 그건 프로세스 경계가 생기는 Phase 6의 모양이다.
+   근거: PR #2 리뷰 blocking 1, [`design/phase-3-event.md`](./design/phase-3-event.md).
 11. **`Interceptor`에 대응하는 `CapabilityKind`가 없다** — manifest guard가
    `register_interceptor`를 선언된 슬롯에 매핑할 수 없어 잠정적으로 `capabilities = ["policy"]`를
    요구한다. 변형을 추가하는 것은 닫힌 어휘를 넓히는 `rivet-core` 변경이라 Phase 2 범위 밖으로
@@ -788,6 +806,23 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    `seal`은 진행 중인 등록을 기다려 내므로 그 등록 안의 `spec()`이 멈추면 `load`가
    멈춘다 (측정: 2 s 블로킹 → `load` 4.007 s). 데드라인은 **로더 몫이다** — 기다림을
    강제한 쪽이 로더이고, plugin은 자기 `load`가 언제 포기해야 하는지 알 방법이 없다.
+
+   **Phase 3은 이것을 고치지 않았고, 대신 보이게 만들었다.** 예산을 발명하지 않은 이유는
+   Phase 2와 같다: 여기서 열려 있는 것은 숫자가 아니라 **초과했을 때 무엇을 남기는가**
+   (`FAILED` 레코드인가, 호스트 중단인가)이고, 그건 "닿지 않는 상대"를 예외가 아니라
+   일상으로 만드는 Phase 6의 결정이다. 설계가 지정하지 않은 예산은 그 자체로 새 실패
+   모드다 — 부하 걸린 CI에서 느린 `load`가 `FAILED`가 된다.
+
+   Phase 3이 공짜로 준 것은 **진단**이다. 호스트가 이제 `runtime.started`를 plugin 로드
+   **전에** 발행하고 관측자를 그 전에 붙이므로, 매달린 `load`는 "`runtime.started`와 그
+   id의 `plugin.discovered`는 있는데 `plugin.loaded`도 `plugin.load.failed`도 없는
+   스트림"으로 드러난다. 이전에는 `rivet run`이 시작 지점에서 메시지도 레코드도 없이
+   섰다. 진단이 생겼지 데드라인이 생긴 것은 아니다.
+   (`a_load_that_hangs_shows_up_as_a_discovered_plugin_that_never_loaded`)
+
+   덧붙여 Phase 3은 이 위험을 **늘리지 않는다**. `rivet.telemetry-log`의 `load`는 설정을
+   읽고 구독자 하나를 등록하고 끝난다 — 네트워크도, 파일도, 기다림도 없다. `unload`는
+   no-op이고 펌프는 레지스트리가 abort한다. 표면은 하나 늘고 위험은 안 는다.
    Phase 2에서는 설계가 지정하지 않은 예산을 발명하지 않으려고 열어 뒀다. 늦어도
    프로세스 경계 때문에 "닿지 않는 상대"가 예외가 아니라 일상이 되는 Phase 6 전에는
    닫아야 하고, 그때 정할 것은 숫자만이 아니라 초과했을 때의 상태다 (`FAILED` 레코드인가,

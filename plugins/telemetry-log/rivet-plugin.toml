@@ -1,0 +1,13 @@
+[plugin]
+id           = "rivet.telemetry-log"
+name         = "Telemetry log"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "Structured logs from the event bus, through `tracing`. Observation only."
+capabilities = ["event_subscriber"]
+
+# No scope = it *asks* for every topic. What it actually receives is the meet with the
+# active profile, and the conversation itself (`agent.text.`) is left out of the default
+# subscription by this plugin even where the grant would allow it.
+[[permissions]]
+permission = "events_subscribe"

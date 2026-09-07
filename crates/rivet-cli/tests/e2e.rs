@@ -206,11 +206,16 @@ async fn a_readonly_profile_leaves_write_file_unregistered() {
 }
 
 #[tokio::test]
-async fn with_no_config_file_every_plugin_the_build_provides_is_loaded() {
-    // An absent `[plugins].enabled` means "everything this build provides". Every other
+async fn with_no_config_file_every_plugin_the_default_selection_names_is_loaded() {
+    // An absent `[plugins].enabled` means "the default selection" -- which is not the same
+    // as "the whole catalog" since `catalog::default_selection` narrowed it. Every other
     // end-to-end test writes an explicit list, so nothing else here would notice if the
     // loader silently resolved the default to nothing -- and the symptom would be
     // `rivet "explain this repo"` quietly running with no model and no tools.
+    //
+    // Renamed from `..._every_plugin_the_build_provides_is_loaded`: the body always
+    // asserted about the agent stack, and the old name became false the moment the catalog
+    // carried a plugin the default does not enable.
     let dir = tempfile::tempdir().unwrap();
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_rivet"))
         .arg("doctor")
@@ -238,6 +243,263 @@ async fn with_no_config_file_every_plugin_the_build_provides_is_loaded() {
             "{registration} missing: {stdout}"
         );
     }
+    assert!(
+        !stdout.contains("subscriber:telemetry.log"),
+        "the observation sidecar must not switch itself on in an unconfigured tree: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn the_telemetry_plugin_is_not_in_the_default_selection() {
+    // The other half of the same rule, from the plugin's own side: it is in the catalog, so
+    // `rivet plugin list` shows it and `enabled` can name it -- and it is not loaded.
+    let provider = Provider::start(vec![sse_text("unused")]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    std::fs::remove_file(workspace.path().join("rivet.toml")).unwrap();
+
+    let (code, stdout, stderr) = workspace
+        .command(&["plugin", "list"])
+        .env("OPENAI_API_KEY", "not-a-real-key")
+        .output()
+        .await
+        .map(|o| {
+            (
+                o.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            )
+        })
+        .expect("spawn rivet");
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("rivet.telemetry-log"))
+        .unwrap_or_else(|| panic!("telemetry is not in the catalog at all: {stdout}"));
+    assert!(
+        row.contains("VALIDATED"),
+        "it has to be discovered and validated: {row}"
+    );
+    assert!(
+        row.split_whitespace().nth(1) == Some("no"),
+        "the ENABLED column has to say `no` with no config file: {row}"
+    );
+}
+
+#[tokio::test]
+async fn the_telemetry_plugin_logs_a_run_when_enabled() {
+    // 3.3 end to end: switched on by name, it emits structured records to stderr, and
+    // `RIVET_LOG_FORMAT=json` makes them parseable rather than pretty.
+    let provider = Provider::start(vec![sse_text("hello")]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    enable_telemetry(&workspace);
+
+    let output = workspace
+        .command(&["say hello"])
+        .env("RIVET_LOG_FORMAT", "json")
+        .env_remove("RUST_LOG")
+        .output()
+        .await
+        .expect("spawn rivet");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value["fields"]["message"] == "rivet event")
+        .collect();
+    assert!(
+        !records.is_empty(),
+        "the telemetry plugin was enabled and logged nothing: {stderr}"
+    );
+    for record in &records {
+        assert!(
+            record["fields"]["topic"].is_string(),
+            "every record names its topic: {record}"
+        );
+    }
+    assert!(
+        records
+            .iter()
+            .any(|r| r["fields"]["topic"] == "agent.run.started"),
+        "the run itself has to be in there: {stderr}"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|r| r["fields"]["topic"] == "agent.text.delta"),
+        "the conversation is off by default, so it is not even subscribed to: {stderr}"
+    );
+}
+
+/// Rewrite the workspace's config to enable the telemetry plugin alongside the agent stack.
+fn enable_telemetry(workspace: &Workspace) {
+    let path = workspace.path().join("rivet.toml");
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "enabled = [\"rivet.model-openai\", \"rivet.tool-filesystem\"]",
+        "enabled = [\"rivet.model-openai\", \"rivet.tool-filesystem\", \"rivet.telemetry-log\"]",
+    );
+    std::fs::write(&path, text).unwrap();
+}
+
+// --- DoD 6: `--jsonl` is observability, and not a session export -----------------------------
+
+/// Phase 3 `DoD` 6, first half.
+///
+/// Before this phase the observer was attached *after* `catalog::load`, so `runtime.started`
+/// and the whole plugin lifecycle happened with nobody listening, and the tail of the stream
+/// was cut by `sleep(20 ms); abort()`. Both ends are asserted here.
+#[tokio::test]
+async fn jsonl_carries_the_whole_lifecycle_not_just_the_answer() {
+    let provider = Provider::start(vec![
+        sse_tool_call("read_file", &serde_json::json!({"path": "src/main.rs"})),
+        sse_text("it prints a marker"),
+    ])
+    .await;
+    let workspace = Workspace::new(&provider.base_url);
+
+    let (code, stdout, stderr) = workspace.run(&["--jsonl", "read the file"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let topics: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|value| topic_of(&value))
+        .collect();
+
+    assert_eq!(
+        topics.first().map(String::as_str),
+        Some("runtime.started"),
+        "the stream has to start with the runtime announcing itself: {topics:?}"
+    );
+    for expected in [
+        "runtime.started",
+        "plugin.discovered",
+        "plugin.loaded",
+        "agent.run.started",
+        "tool.execute.started",
+        "tool.execute.completed",
+        "agent.run.completed",
+        "runtime.shutting_down",
+        "plugin.unloaded",
+    ] {
+        assert!(
+            topics.iter().any(|t| t == expected),
+            "`{expected}` missing from the stream: {topics:?}"
+        );
+    }
+
+    let shutting = topics.iter().position(|t| t == "runtime.shutting_down");
+    let unloaded = topics.iter().position(|t| t == "plugin.unloaded");
+    assert!(
+        shutting < unloaded,
+        "shutting_down announces the teardown, so it comes first: {topics:?}"
+    );
+}
+
+/// Phase 3 `DoD` 6, second half — the part `docs/plan.md` rewrote the `DoD` for.
+///
+/// The bus is lossy, so its stream can never be a faithful record. The durable facts live
+/// in the session log and are reachable through `rivet session show --json`. This asserts
+/// the two are different in the way that matters: the durable one carries the conversation
+/// and a sequence number, and the bus stream carries neither.
+#[tokio::test]
+async fn the_jsonl_stream_is_not_a_session_export() {
+    let provider = Provider::start(vec![sse_text("hello there")]).await;
+    let workspace = Workspace::new(&provider.base_url);
+
+    let (code, stream, stderr) = workspace.run(&["--jsonl", "say hello"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let bus: Vec<serde_json::Value> = stream
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(!bus.is_empty(), "no bus events: {stream}");
+    for event in &bus {
+        assert!(
+            event["seq"].is_null(),
+            "a bus event has no sequence number; nothing orders it durably: {event}"
+        );
+    }
+
+    let session = workspace.session_id().expect("a session");
+    let (code, durable, stderr) = workspace
+        .run(&["session", "show", &session, "--json"])
+        .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let stored: Vec<serde_json::Value> = durable
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let durable_types: Vec<&str> = stored
+        .iter()
+        .filter_map(|e| e["event"]["type"].as_str())
+        .collect();
+    for expected in ["user.message", "assistant.message"] {
+        assert!(
+            durable_types.contains(&expected),
+            "`{expected}` is a durable fact and has to be in the session log: {durable_types:?}"
+        );
+    }
+    assert!(
+        stored.iter().all(|e| e["seq"].is_number()),
+        "every durable event is sequenced: {durable}"
+    );
+
+    // And the bus stream carries none of the three.
+    let bus_topics: Vec<String> = bus.iter().filter_map(topic_of).collect();
+    for absent in ["user.message", "assistant.message"] {
+        assert!(
+            !bus_topics.iter().any(|t| t == absent),
+            "`{absent}` is a durable fact and must not be read off the lossy bus: {bus_topics:?}"
+        );
+    }
+}
+
+/// The topic of a serialized envelope, rebuilt from its tagged payload.
+fn topic_of(event: &serde_json::Value) -> Option<String> {
+    let payload = event.get("payload")?;
+    let event_name = payload.get("event")?.as_str()?;
+    let kind = payload.get("kind")?.as_str()?;
+    // The wire form is `{event: "tool", kind: "started"}`; the topic is what
+    // `Event::topic` returns, so this maps the two-field form onto it.
+    Some(match (event_name, kind) {
+        ("agent", "run_started") => "agent.run.started".into(),
+        ("agent", "turn_started") => "agent.turn.started".into(),
+        ("agent", "request_started") => "agent.request.started".into(),
+        ("agent", "text_delta") => "agent.text.delta".into(),
+        ("agent", "request_completed") => "agent.request.completed".into(),
+        ("agent", "request_failed") => "agent.request.failed".into(),
+        ("agent", "turn_completed") => "agent.turn.completed".into(),
+        ("agent", "run_completed") => "agent.run.completed".into(),
+        ("tool", "requested") => "tool.requested".into(),
+        ("tool", "started") => "tool.execute.started".into(),
+        ("tool", "progress") => "tool.execute.progress".into(),
+        ("tool", "completed") => "tool.execute.completed".into(),
+        ("tool", "blocked") => "tool.blocked".into(),
+        ("plugin", "discovered") => "plugin.discovered".into(),
+        ("plugin", "loaded") => "plugin.loaded".into(),
+        ("plugin", "load_failed") => "plugin.load.failed".into(),
+        ("plugin", "unloaded") => "plugin.unloaded".into(),
+        ("runtime", "started") => "runtime.started".into(),
+        ("runtime", "shutting_down") => "runtime.shutting_down".into(),
+        ("runtime", "subscriber_lagged") => "runtime.subscriber.lagged".into(),
+        (family, kind) => format!("{family}.{kind}"),
+    })
+}
+
+#[tokio::test]
+async fn tui_refuses_a_pipe() {
+    // Raw mode on a pipe leaves no terminal to put back, and the symptom shows up later as
+    // a shell that stopped echoing. So it is refused before raw mode, as exit code 2.
+    let provider = Provider::start(vec![sse_text("unused")]).await;
+    let workspace = Workspace::new(&provider.base_url);
+
+    let (code, _stdout, stderr) = workspace.run(&["--tui", "hello"]).await;
+    assert_eq!(code, 2, "a setup problem is exit code 2: {stderr}");
+    assert!(stderr.contains("needs a terminal"), "{stderr}");
 }
 
 #[tokio::test]

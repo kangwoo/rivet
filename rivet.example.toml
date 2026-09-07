@@ -28,8 +28,11 @@ deny = [".env", ".git/config", ".ssh", "**/credentials.json", "**/*.pem"]
 # listed until Phase 4 ships them -- a plugin that registers nothing would only lie to
 # `rivet plugin list`.
 #
-# Leaving this key out (or empty) means "every plugin this build provides", which is what
-# makes `rivet "explain this repo"` work with no configuration file at all.
+# Leaving this key out (or empty) means the *default selection* -- what it takes to run an
+# agent -- which is what makes `rivet "explain this repo"` work with no configuration file
+# at all. It does not mean "every plugin this build provides": `rivet.telemetry-log` is in
+# the catalog and outside the default, because a log collector should not switch itself on
+# for somebody who never wrote a config.
 #
 # `rivet.context-builtin` (the system-prompt and workspace providers) is always registered:
 # the loop cannot assemble a request without it, so it is not an option to switch off.
@@ -40,11 +43,31 @@ deny = [".env", ".git/config", ".ssh", "**/credentials.json", "**/*.pem"]
 enabled = [
     "rivet.model-openai",
     "rivet.tool-filesystem",
+    # Structured logs from the event bus, through `tracing`. In the catalog, out of the
+    # default selection -- uncomment to switch it on. Note that this file only reaches
+    # somebody who already has an explicit `enabled` list; what keeps it off for everyone
+    # else is `catalog::default_selection`, not this comment.
+    #
+    #   RIVET_LOG_FORMAT=json rivet "explain this repo" 2>telemetry.jsonl
+    #
+    # "rivet.telemetry-log",
 ]
 
 [plugins."rivet.model-openai"]
 base_url = "https://api.deepseek.com/v1"
 api_key_env = "DEEPSEEK_API_KEY"        # the key itself never goes in this file
+
+# [plugins."rivet.telemetry-log"]
+# The prefixes to subscribe to. Omit for the default, which deliberately leaves out
+# `agent.text.` -- the model's output, verbatim.
+# topics = ["agent.run.", "agent.turn.", "agent.request.", "tool.", "plugin.", "runtime."]
+# level = "info"                        # trace | debug | info | warn
+#
+# Put the whole conversation in the log. `false` means it is not even subscribed to:
+# counting the deltas would mean receiving them, and receiving them means they exist
+# somewhere. A profile that withholds `agent.text.` refuses to load with this on, rather
+# than quietly logging less than it was told to.
+# include_conversation = false
 
 # In Phase 1 a profile narrows the agent's *tool scope* -- which tools are registered and
 # therefore offered to the model. That is pipeline step 2, not policy enforcement: the

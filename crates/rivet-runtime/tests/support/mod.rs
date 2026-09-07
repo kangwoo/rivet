@@ -61,6 +61,28 @@ pub fn sse_tool_calls(calls: &[(&str, serde_json::Value)]) -> String {
     body
 }
 
+/// A plain text answer delivered as `chunks` separate deltas.
+///
+/// One `agent.text.delta` per chunk, so a test can put a known number of events on the bus
+/// through the real decoder rather than by publishing them by hand.
+pub fn sse_text_in_chunks(text: &str, chunks: usize) -> String {
+    let mut body = String::new();
+    for index in 0..chunks.max(1) {
+        let _ = write!(
+            body,
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\
+             \"content\":{}}},\"finish_reason\":null}}]}}\n\n",
+            serde_json::Value::String(format!("{text}{index} "))
+        );
+    }
+    body.push_str(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\
+         \"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n\
+         data: [DONE]\n\n",
+    );
+    body
+}
+
 /// An answer cut off at the output token limit.
 pub fn sse_truncated(text: &str) -> String {
     format!(
@@ -284,6 +306,35 @@ impl Tool for FailingTool {
     }
 }
 
+/// Reports progress before it answers, so a test can observe `tool.execute.progress`.
+///
+/// That topic has exactly one publisher — `ctx.host.progress` in `dispatch.rs` — and no
+/// tool in this repository calls it, so without this double the topic is unreachable from
+/// a loop test.
+#[derive(Debug)]
+pub struct ProgressTool;
+
+#[async_trait]
+impl Tool for ProgressTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            "with_progress",
+            "reports progress, then answers",
+            serde_json::json!({ "type": "object", "additionalProperties": false }),
+        )
+        .unwrap()
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        _input: serde_json::Value,
+    ) -> rivet_core::Result<ToolResult> {
+        ctx.host.progress("halfway");
+        Ok(ToolResult::ok("done"))
+    }
+}
+
 /// Honors cancellation promptly.
 ///
 /// `trip` makes the timing deterministic: the token is cancelled the instant the tool
@@ -476,9 +527,25 @@ impl Harness {
         Self::with_store(|store| store).await
     }
 
+    /// A harness whose bus holds `capacity` events, for tests about lag.
+    ///
+    /// The default 4096 is deep enough that making a subscriber fall behind would mean
+    /// publishing thousands of events; a shallow bus makes the same property provable in a
+    /// handful.
+    pub async fn with_bus_capacity(capacity: usize) -> Self {
+        Self::build(|store| store, capacity).await
+    }
+
     /// Build a harness whose store is wrapped by `wrap`.
     pub async fn with_store(
         wrap: impl FnOnce(Arc<dyn SessionStore>) -> Arc<dyn SessionStore>,
+    ) -> Self {
+        Self::build(wrap, 4096).await
+    }
+
+    async fn build(
+        wrap: impl FnOnce(Arc<dyn SessionStore>) -> Arc<dyn SessionStore>,
+        bus_capacity: usize,
     ) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -491,7 +558,7 @@ impl Harness {
 
         let workspace =
             rivet_runtime::workspace::open(dir.path(), [".env".to_string()]).expect("workspace");
-        let bus = Arc::new(BroadcastBus::new());
+        let bus = Arc::new(BroadcastBus::with_capacity(bus_capacity));
         let registry = Registry::new((*bus).clone());
         let scoped = registry.scoped(Owner {
             plugin_id: PluginId::new("rivet.test").unwrap(),
@@ -523,6 +590,17 @@ impl Harness {
             session_id,
             scoped,
         }
+    }
+
+    /// A subscriber that remembers every bus topic it saw, already attached.
+    ///
+    /// Attached through `observe` rather than `attach`, because a test wants to *end* the
+    /// pump and read what it got — the same reason the host does.
+    #[must_use]
+    pub fn recorder(&self) -> (Arc<Recorder>, rivet_runtime::Observer) {
+        let recorder = Arc::new(Recorder::default());
+        let observer = self.bus.observe(recorder.clone());
+        (recorder, observer)
     }
 
     pub async fn register_model(&self, model: Arc<dyn Model>) {
@@ -593,6 +671,62 @@ impl Harness {
                     .to_string()
             })
             .collect()
+    }
+}
+
+/// Collects bus topics, and the payloads a test needs to look inside.
+#[derive(Debug, Default)]
+pub struct Recorder {
+    seen: std::sync::Mutex<Vec<rivet_core::event::EventEnvelope>>,
+}
+
+impl Recorder {
+    /// Every topic seen, in delivery order.
+    #[must_use]
+    pub fn topics(&self) -> Vec<String> {
+        self.envelopes()
+            .iter()
+            .map(|e| e.topic().to_string())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn envelopes(&self) -> Vec<rivet_core::event::EventEnvelope> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The lag reports seen, as `(subscriber, dropped)`.
+    #[must_use]
+    pub fn lag_reports(&self) -> Vec<(String, u64)> {
+        self.envelopes()
+            .iter()
+            .filter_map(|e| match &e.payload {
+                rivet_core::event::Event::Runtime(
+                    rivet_core::event::RuntimeEvent::SubscriberLagged {
+                        subscriber,
+                        dropped,
+                    },
+                ) => Some((subscriber.clone(), *dropped)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl rivet_core::event::EventSubscriber for Recorder {
+    fn name(&self) -> &'static str {
+        "recorder"
+    }
+
+    async fn on_event(&self, envelope: &rivet_core::event::EventEnvelope) {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(envelope.clone());
     }
 }
 

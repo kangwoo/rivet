@@ -17,6 +17,7 @@ use rivet_core::id::PluginId;
 use rivet_model_openai::OpenAiPlugin;
 use rivet_plugin::{PluginLoader, PluginSource};
 use rivet_runtime::{BroadcastBus, Registry};
+use rivet_telemetry_log::TelemetryLogPlugin;
 use rivet_tool_filesystem::FilesystemPlugin;
 
 use crate::config::{Config, PluginSelection, Profile};
@@ -46,7 +47,36 @@ pub fn sources() -> Vec<PluginSource> {
             rivet_context_builtin::MANIFEST_TOML,
             |manifest| Arc::new(ContextPlugin::new(manifest)),
         ),
+        PluginSource::builtin(
+            "rivet-telemetry-log",
+            rivet_telemetry_log::MANIFEST_TOML,
+            |manifest| Arc::new(TelemetryLogPlugin::new(manifest)),
+        ),
     ]
+}
+
+/// What an absent or empty `[plugins].enabled` selects.
+///
+/// **Not "the whole catalog".** `config.rs` wrote down why `PluginSelection::All` exists:
+/// so that `rivet "explain this repo"` works in a directory with no `rivet.toml`. What
+/// that needs is a model, tools and context. An observation sidecar is a different thing,
+/// and switching it on for everyone who never wrote a config is not what "all" was for.
+///
+/// A plugin outside this list is still **discovered**, still appears in `rivet plugin
+/// list`, and still loads the moment `enabled` names it. Phase 2's rule — an id either
+/// loads or is a typo — is untouched; what this list decides is the *default selection*,
+/// not what the build provides.
+///
+/// The distinction is not for one plugin: `docs/plan.md`'s MVP boundary table puts
+/// `telemetry(otel · prometheus)` in MVP+, so at least two more of the same shape are
+/// coming.
+#[must_use]
+pub fn default_selection() -> Vec<PluginId> {
+    ["rivet.model-openai", "rivet.tool-filesystem"]
+        .iter()
+        .map(|id| PluginId::new(*id).expect("a literal default-selection id is valid"))
+        .chain(std::iter::once(context_plugin_id()))
+        .collect()
 }
 
 /// A registry with the configured plugins loaded, and the loader that owns them.
@@ -86,7 +116,12 @@ pub fn inspect(profile: Profile) -> rivet_core::Result<PluginLoader> {
     Ok(loader)
 }
 
-/// Load the configured plugins into a fresh registry.
+/// Load the configured plugins into a fresh registry on `bus`.
+///
+/// The bus is a parameter, not something this function makes. Who creates it decides when
+/// an observer can be attached to it, and everything Phase 3 wants out of `--jsonl` — the
+/// `runtime.started` line, the whole plugin lifecycle — happens *inside this call*. A bus
+/// made here would be one nobody could be listening to yet.
 ///
 /// # Errors
 /// An enabled id this build does not provide, or any plugin failing to load. Every plugin
@@ -97,8 +132,7 @@ pub fn inspect(profile: Profile) -> rivet_core::Result<PluginLoader> {
 /// That includes a tool whose schema uses a keyword the runtime does not enforce:
 /// [`rivet_runtime::schema::validate_spec`] runs inside `register_tool`, so such a tool
 /// fails its own registration and the plugin carrying it is rolled back like any other.
-pub async fn load(config: &Config) -> rivet_core::Result<Host> {
-    let bus = BroadcastBus::new();
+pub async fn load(config: &Config, bus: BroadcastBus) -> rivet_core::Result<Host> {
     let registry = Registry::new(bus.clone());
     let events = registry.events();
     let mut loader = PluginLoader::new(
@@ -155,7 +189,7 @@ pub fn select(
         .collect();
 
     let mut chosen = match selection {
-        PluginSelection::All => known.clone(),
+        PluginSelection::All => default_selection(),
         PluginSelection::Only(ids) => {
             for id in ids {
                 if !known.contains(id) {
@@ -221,10 +255,53 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_enabled_list_selects_the_whole_catalog() {
+    fn an_absent_enabled_list_selects_the_default_not_the_whole_catalog() {
+        // Renamed from `..._selects_the_whole_catalog`, which stopped being true when
+        // `default_selection` narrowed what `All` means. The catalog is what this build
+        // *can* load; the default selection is what it loads when nobody said.
         let loader = inspect(Profile::Developer).unwrap();
         let chosen = select(&loader, &PluginSelection::All).unwrap();
-        assert_eq!(chosen.len(), sources().len());
+        assert_eq!(chosen, default_selection());
+        assert!(
+            chosen.len() < sources().len(),
+            "the catalog now carries a plugin the default does not enable"
+        );
+    }
+
+    #[test]
+    fn every_default_selection_id_is_in_the_catalog() {
+        // `select`'s `All` branch does no validation -- only the `Only` branch checks ids
+        // against the catalog. So a typo here would sail through `select` and fail in
+        // `load_selected`, on *every* run, including the ones with no config file at all.
+        let loader = inspect(Profile::Developer).unwrap();
+        for id in default_selection() {
+            assert!(
+                loader.record(&id).is_some(),
+                "`{id}` is in the default selection and not in the catalog: {}",
+                loader.known_ids()
+            );
+        }
+    }
+
+    #[test]
+    fn an_opt_in_plugin_is_absent_by_default_and_loads_when_named() {
+        // The two halves of §7-8: the observation sidecar is in the catalog, so an
+        // operator can enable it, and it is out of the default selection, so a tree with
+        // no `rivet.toml` does not quietly start one.
+        let telemetry = PluginId::new(rivet_telemetry_log::PLUGIN_ID).unwrap();
+        let loader = inspect(Profile::Developer).unwrap();
+        assert!(
+            loader.record(&telemetry).is_some(),
+            "it has to be discoverable, or `enabled` naming it would be a typo"
+        );
+        assert!(
+            !select(&loader, &PluginSelection::All)
+                .unwrap()
+                .contains(&telemetry)
+        );
+
+        let named = PluginSelection::Only(vec![telemetry.clone()]);
+        assert!(select(&loader, &named).unwrap().contains(&telemetry));
     }
 
     #[test]

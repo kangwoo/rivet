@@ -8,15 +8,22 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# `rivet-runtime` is deliberately absent, and `the_tui_crate_does_not_depend_on_the_runtime`
+# parses this file to keep it that way. The TUI consumes events; it never reaches into the
+# thing that produces them. `tokio-util` is a third-party crate, not a runtime type: the
+# host's cancellation token has to be the *same* type on both sides of `render_loop`.
 [dependencies]
 rivet-core.workspace = true
 async-trait.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 tokio = { workspace = true }
-rivet-runtime.workspace = true
+tokio-util.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+
+[dev-dependencies]
+# The independence test parses this manifest rather than grepping it: a string search
+# false-positives on a comment and misses `rivet-runtime.workspace = true`.
+toml.workspace = true
 
 [lints]
 workspace = true

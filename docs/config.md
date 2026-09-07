@@ -133,10 +133,17 @@ rivet plugin show rivet.tool-filesystem  # 매니페스트 + 프로파일 교집
 Phase 4에서 온다. 그때까지 여기 적으면 오타와 똑같이 실패한다 — 아무것도 등록하지 않는
 plugin을 끼워 넣는 것은 `rivet plugin list`에 거짓말을 하는 일이기 때문이다.
 
-**`enabled`를 아예 쓰지 않거나 빈 목록으로 두면 "이 빌드가 가진 plugin 전부"다.**
+**`enabled`를 아예 쓰지 않거나 빈 목록으로 두면 "기본 선택"이다** — 에이전트를 돌리는 데
+필요한 것, 즉 `rivet.model-openai` · `rivet.tool-filesystem` · `rivet.context-builtin`.
 `rivet.toml` 없이 `rivet "이 저장소 설명해줘"`가 도는 이유가 이것이다. 목록에 같은 id를
 두 번 적으면 한 번만 로드된다. 순서는 계약이 아니다 — 이름 충돌은 레지스트리가 거부하고
 interceptor는 priority로 정렬된다.
+
+**"카탈로그 전부"는 아니다.** Phase 3부터 관측 사이드카(`rivet.telemetry-log`)가 카탈로그에
+있는데 기본 선택에는 없다 — 설정 파일을 안 쓴 사람의 실행에서 로그 수집기가 저절로 켜지는
+것은 `enabled`의 기본값이 뜻하려던 것이 아니다. 기본 밖의 plugin도 **discover되고**,
+`rivet plugin list`에 나오고(그 목록 아래에 어느 것이 기본 밖인지 한 줄로 나온다),
+`enabled`가 이름을 대는 순간 로드된다. Phase 2의 규칙("id는 로드되거나 오타다")은 그대로다.
 
 ### `[plugins."<plugin id>"]` — plugin별 설정
 
@@ -165,6 +172,43 @@ api_key_env = "DEEPSEEK_API_KEY"
 
 **API 키는 이 파일에 넣지 않는다.** `api_key_env`는 키가 들어 있는 **환경 변수의 이름**을
 가리킨다. 키 자체는 설정 파일에도, 에러 메시지에도 등장하지 않는다.
+
+`rivet.telemetry-log`가 받는 것 (전부 선택):
+
+| 키 | 기본값 |
+|---|---|
+| `topics` | `["agent.run.", "agent.turn.", "agent.request.", "tool.", "plugin.", "runtime."]` — 구독할 접두사 |
+| `level` | `"info"` — `trace` \| `debug` \| `info` \| `warn` |
+| `include_conversation` | `false` — 모델 출력 전문(`agent.text.`)을 로그에 넣는다 |
+
+기본 `topics`는 `agent.text.`를 **뺀** 목록이다. 대화 전문이 기본값으로 로그에 나가는 것은
+프로파일이 막아 줄 일이 아니라 plugin이 스스로 안 할 일이다. `include_conversation = false`
+(기본)이면 그 접두사를 **구독하지도 않는다** — 길이만 세는 것도 안 한다. 세려면 받아야 하고,
+받으면 어딘가에 남는다.
+
+**적어 넣은 것과 기본값은 다르게 다뤄진다.**
+
+| 무엇을 적었나 | 프로파일이 그것을 좁히면 |
+|---|---|
+| 아무것도 (기본 목록) | 좁혀진 채로 등록한다. 기본 목록은 plugin의 *선호*다 |
+| `topics = [...]` | **로드 실패.** 사라진 접두사를 이름으로 댄다 |
+| `include_conversation = true` | **로드 실패** — `agent.text.`를 안 주는 프로파일에서 |
+
+접두사의 meet은 합집합이라 좁은 프로파일 + `agent.text.`는 "권한 0"이 **아니라** "그것만
+사라짐"이 된다. 호스트의 guard는 빈 meet만 거절하므로 이 경우를 못 잡는다. 잡는 것은 plugin
+자신이고, 운영자가 *적어 넣은* 것이 말없이 사라지지 않게 하는 것이 이 규칙의 전부다.
+
+이 plugin은 `fs_write`도 `network_http`도 요청하지 않는다. 목적지는 호스트의 `tracing`
+sink이고, 그것을 고르는 것은 운영자다 — `RUST_LOG`, `RIVET_LOG_FORMAT`, 리다이렉션.
+
+```bash
+# 켜고, JSON 으로, 파일에
+RIVET_LOG_FORMAT=json rivet "explain this repo" 2>telemetry.jsonl
+```
+
+`--jsonl`(stdout)과 telemetry(stderr)는 목적지가 다르므로 섞이지 않는다. 다만 telemetry는
+human 렌더러와 stderr을 **공유한다** — `→ read_file` 줄 사이에 로그 줄이 낀다. 위의
+리다이렉션이 답이다.
 
 provider별 조합:
 
@@ -270,10 +314,20 @@ plugin과 도구 plugin이 그것을 공유하므로, `readonly`에서 빼면 pr
 | `--config <경로>` | 설정 파일 지정 |
 | `--profile <이름>` | `[policy] profile` 덮어쓰기 |
 | `--headless` | TUI도 승인 프롬프트도 없이 실행. 사람에게 물어야 하는 건 매달리지 않고 **거부**된다. CI용 |
-| `--jsonl` | 렌더링 대신 줄 단위 JSON 이벤트를 stdout으로. `--headless`와 함께 쓸 수 없다 |
+| `--jsonl` | 렌더링 대신 줄 단위 JSON 이벤트를 stdout으로. `--headless`·`--tui`와 함께 쓸 수 없다 |
+| `--tui` | 전체 화면 UI (Job 패널 · Agent 패널 · 상태바). 터미널이 필요하므로 파이프면 exit 2. `--headless`·`--jsonl`과 함께 쓸 수 없다 |
 
 `--jsonl`은 **관찰용이지 세션 재구성용이 아니다.** 이벤트 버스는 설계상 lossy하다.
 세션을 재구성하려면 `rivet session show --json`을 쓴다.
+
+스트림은 `runtime.started`로 시작해 `runtime.shutting_down` · `plugin.unloaded`로 끝난다.
+꼬리가 예산(2초) 안에 다 안 나가면 stderr에 "잘렸다"고 한 줄이 나온다 — 잘린 것을 모르는
+스트림보다 낫다.
+
+**기본 로그 필터가 Phase 3에서 바뀌었다.** `warn` → `warn,rivet_telemetry_log=info`.
+telemetry plugin이 켜져 있는데 아무것도 안 보이면 "구조화 로그"가 절반만 참이기 때문이다.
+그 plugin은 기본 선택에 없으므로, **아무도 안 켠 실행의 stderr는 이전과 같다** — 이 지시어가
+가리킬 대상이 없다. `RUST_LOG`는 여전히 통째로 덮어쓴다.
 
 ### 종료 코드
 
@@ -296,7 +350,8 @@ plugin과 도구 plugin이 그것을 공유하므로, `readonly`에서 빼면 pr
 |---|---|
 | `RIVET_CONFIG` | 설정 파일 경로 |
 | `api_key_env`가 가리키는 변수 | provider API 키. 기본 이름은 `OPENAI_API_KEY` |
-| `RUST_LOG` | 로그 필터. 기본 `warn`, stderr로 나간다 |
+| `RUST_LOG` | 로그 필터. 기본 `warn,rivet_telemetry_log=info`, stderr로 나간다. 설정하면 통째로 이긴다 |
+| `RIVET_LOG_FORMAT` | `json`이면 로그가 줄 단위 JSON으로 나온다. 그 외 값은 사람이 읽는 형식 |
 | `RIVET_DUMP_REQUESTS` | 조립된 요청을 이 디렉터리에 덤프한다 (디버깅용) |
 
 테스트에서만 쓰는 것: `RIVET_LIVE`, `RIVET_LIVE_BASE_URL`, `RIVET_LIVE_KEY_ENV`,

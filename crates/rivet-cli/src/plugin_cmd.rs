@@ -58,6 +58,23 @@ pub fn list(config: &Config) -> rivet_core::Result<()> {
             println!("  ! {error}");
         }
     }
+    // The `ENABLED` column already answers "is this one on", which is what an operator
+    // usually wants. What it cannot say is *why* something is off in a tree with no config
+    // file, so name the opt-in plugins once rather than adding a column that repeats
+    // `ENABLED` everywhere except here.
+    let default = catalog::default_selection();
+    let opt_in: Vec<&str> = loader
+        .records()
+        .iter()
+        .filter(|record| !default.contains(&record.id) && record.id != catalog::context_plugin_id())
+        .map(|record| record.id.as_str())
+        .collect();
+    if !opt_in.is_empty() {
+        println!(
+            "\nnot in the default selection; name them in `[plugins].enabled` to load them: {}",
+            opt_in.join(", ")
+        );
+    }
     println!("\nrun `rivet doctor` to load them and see what each one registers");
     Ok(())
 }

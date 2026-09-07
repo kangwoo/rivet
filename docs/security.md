@@ -378,21 +378,27 @@ Policy가 순수 함수여야 하는 이유도 이것이다: 감사 시점에 �
 rivet --profile readonly "왜 이 테스트가 실패하지?"
 ```
 
-> **⚠ `events_subscribe`의 scope는 아직 선언이지 강제가 아니다.** `fs_read`와 같은
-> 자리에 있다 — [`plugin.md` §4.2](./plugin.md)와
-> [`architecture.md` §11-13](./architecture.md)이 그쪽을 같은 어조로 적고 있다.
+> **`events_subscribe`의 scope는 Phase 3부터 강제된다.** 배달 경로가 grant를 읽는다:
+> `readonly` · `reviewer` · `production`에서 모든 토픽을 원하는 plugin 구독자는
+> `agent.text.delta`를 **한 번도** 받지 못한다
+> (`a_readonly_profile_keeps_the_conversation_from_a_subscriber`).
 >
-> 어휘와 프로파일 grant는 있다 — `developer`·`ci`는 모든 토픽, `readonly`·`reviewer`·
-> `production`은 `agent.text`를 뺀 나머지다. 그런데 **배달 경로가 그 grant를 읽지
-> 않는다.** `BroadcastBus::attach`는 `EventSubscriber::topics()`로 거르고, 그건 구독자
-> **자신의** 선호이며 기본값인 빈 목록을 `topic_matches`가 "전부"로 읽는다. 그래서
-> `events_subscribe(["tool."])`만 가진 plugin도 `agent.text.delta`를 받고, 심지어
-> `events_subscribe`를 선언하지 않아도 구독할 수 있다.
+> `developer` · `ci`는 여전히 모든 토픽이다. 좁은 셋은 `agent.text`를 뺀 나머지이고,
+> 접두사는 부정을 표현할 수 없으므로 형제를 열거해 뺐다 — `agent.` 밑에 토픽이 새로
+> 생기면 누가 목록에 추가하기 전까지는 주어지지 않는다. 닫히는 쪽으로 실패한다. 그 실패가
+> 조용하지 않도록 `every_topic_is_granted_or_deliberately_withheld`가 **와일드카드 없는
+> 두 층 `match`**로 토픽 전체를 훑는다 — 변형이든 패밀리든, 새로 생기면 컴파일에 실패한다.
 >
-> 배선은 **Phase 3**이다 — 3.2가 `EventSubscriber` 등록과 토픽 필터를 다루는 항목이고,
-> `attach_subscriber`가 그 이음매다. 여기서 어휘를 먼저 정한 이유는 Phase 3이 맨몸
-> permission 위에 짓지 않게 하려는 것이다. 자세한 것은
+> 강제되는 것과 **아직 아닌 것**을 구분해 둔다. 강제: 빈 `topics()`는 grant의 목록이 되고,
+> `events_subscribe` 없는 plugin은 구독자를 등록할 수 없고, grant와 겹치지 않는 `topics()`는
+> `Err`다. 아직 아님: `events_publish`는 강제되지 않는다 — `ctx.events`가 grant와 무관하게
+> 통째로 넘어가므로 plugin이 위조 `agent.*`를 발행할 수 있다. 모든 프로파일이 이 권한을
+> 주므로 오늘 아무것도 안 터지지만, 진짜 답은 발행자를 envelope에 스탬프하는 것이고 그건
+> 프로세스 경계가 생기는 Phase 6의 모양이다. 자세한 것은
 > [`architecture.md` §11-10](./architecture.md).
+>
+> 호스트 자신의 소비자(`--jsonl`, TUI)는 이 권한을 지나지 않는다. 호스트는 plugin이 아니고,
+> 그 둘을 제약하는 것은 프로파일이 아니라 CLI를 실행한 사람이다.
 
 > **⚠ `network` 열은 아직 어느 프로파일에서도 강제되지 않는다.** 그리고 Phase 2 기준으로
 > 프로파일은 **provider 호출과 도구 egress를 구분하지 못한다.**

@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::guard::GuardedRegistry;
 use crate::source::{Origin, PluginSource};
+use crate::subscriber::Grant;
 
 /// What the loader knows about one plugin.
 #[derive(Clone, Debug)]
@@ -234,6 +235,12 @@ impl PluginLoader {
             }),
             id.clone(),
             manifest.capabilities.clone(),
+            // Both fields are already on the record, filled by `validate`. The guard is
+            // handed what the loader decided, not asked to decide it again.
+            Grant {
+                effective: self.records[index].effective.clone(),
+                denied: self.records[index].denied.clone(),
+            },
         ));
         let ctx = PluginContext {
             instance_id,

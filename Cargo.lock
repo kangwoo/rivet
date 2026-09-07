@@ -1406,6 +1406,7 @@ dependencies = [
  "rivet-plugin",
  "rivet-runtime",
  "rivet-session",
+ "rivet-telemetry-log",
  "rivet-tool-filesystem",
  "rivet-tui",
  "serde",
@@ -1553,6 +1554,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivet-telemetry-log"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rivet-core",
+ "rivet-plugin",
+ "rivet-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rivet-tool-filesystem"
 version = "0.1.0"
 dependencies = [
@@ -1599,10 +1615,9 @@ dependencies = [
  "crossterm 0.29.0",
  "ratatui",
  "rivet-core",
- "rivet-runtime",
- "serde",
- "serde_json",
  "tokio",
+ "tokio-util",
+ "toml",
 ]
 
 [[package]]
