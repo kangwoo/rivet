@@ -109,6 +109,30 @@ PluginSource::builtin("acme-tool-lint", acme_tool_lint::MANIFEST_TOML,
 `rivet plugin new <id>`가 crate를 만들고 이 줄을 그대로 출력한다. 별도 프로세스 로딩은
 Phase 6다.
 
+### `events_subscribe`의 scope
+
+토픽 **접두사** 목록이고, 생략하면 전체다.
+
+```toml
+[[permissions]]
+permission = "events_subscribe"
+scope      = ["tool.", "agent.run."]   # 생략 = 모든 토픽
+```
+
+호스트 allowlist와 달리 두 scope의 meet은 문자열 교집합이 **아니다.** 접두사 둘이 공통
+토픽을 가지려면 한쪽이 다른 쪽의 접두사여야 하고, 그때 **긴 쪽**이 답이다 — 프로파일이
+`tool.`을 주고 매니페스트가 `tool.execute.`를 요청하면 결과는 `tool.execute.`이지
+`tool.`이 아니다. `tool.`과 `run.`은 공통 토픽이 없으므로 권한이 0개가 된다. 빈 문자열은
+모든 토픽에 걸리므로 — 좁아 보이면서 전체를 주므로 — 파서가 거부한다.
+
+`readonly` · `reviewer` · `production`은 `agent.text`를 주지 않는다
+([`security.md` §8](./security.md)). 모델 출력 전문이 필요한 plugin이 그 프로파일에서
+그 토픽만 조용히 못 받는 것이 아니다 — `events_subscribe(["agent.text."])`를 선언했다면
+교집합이 비어 아래 관용구 (1)이 발동한다.
+
+`EventSubscriber::topics()`는 구독자 **자신의** 선호이고 기본값이 "전부"라 아무것도
+강제하지 않는다. 무엇을 받을 수 있는지는 이 grant만이 정한다.
+
 ---
 
 ## 3. 최소 Plugin
@@ -261,12 +285,12 @@ if ctx.permissions.allows(&Permission::FsWrite(FsScope::Workspace)) {
 }
 ```
 
-> **⚠ 어느 프로파일도 주지 않는 permission이 넷 있다** — `process_spawn`, `secrets_read`,
-> `events_subscribe`, `job_manage`. `Profile::permissions()`가 주는 것은
-> `fs_read(workspace)` · `session_read` · `session_write` · `events_publish` ·
-> `network_http`, 그리고 쓰기 가능한 프로파일의 `fs_write(workspace)`뿐이다.
+> **⚠ 어느 프로파일도 주지 않는 permission이 셋 있다** — `process_spawn`, `secrets_read`,
+> `job_manage`. `Profile::permissions()`가 주는 것은 `fs_read(workspace)` ·
+> `session_read` · `session_write` · `events_publish` · `network_http` ·
+> `events_subscribe`, 그리고 쓰기 가능한 프로파일의 `fs_write(workspace)`뿐이다.
 >
-> Phase 2부터 교집합이 실제로 계산되므로, 이 넷 중 하나를 매니페스트에 적은 plugin은
+> Phase 2부터 교집합이 실제로 계산되므로, 이 셋 중 하나를 매니페스트에 적은 plugin은
 > **모든 프로파일에서** 그 권한이 0개가 된다. 그 위에 관용구 (1)을 얹으면 그 plugin은
 > 어디서도 로드되지 않는다 — `developer`에서도. (이 문단의 예시가 원래
 > `rivet.tool-shell` + `process_spawn`이었던 이유이고, 그래서 실제로 동작하는

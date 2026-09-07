@@ -299,7 +299,7 @@ pub enum Permission {
     FsRead(FsScope), FsWrite(FsScope), ProcessSpawn,
     NetworkHttp(Option<Vec<String>>),
     SessionRead, SessionWrite,
-    EventsSubscribe, EventsPublish,
+    EventsSubscribe(Option<Vec<String>>), EventsPublish,
     SecretsRead(Vec<String>), JobManage,
 }
 ```
@@ -378,6 +378,13 @@ Policy가 순수 함수여야 하는 이유도 이것이다: 감사 시점에 �
 rivet --profile readonly "왜 이 테스트가 실패하지?"
 ```
 
+**이벤트 구독은 프로파일이 실제로 좁힌다.** `developer`·`ci`는 모든 토픽을 받고,
+`readonly`·`reviewer`·`production`은 `agent.text`를 뺀 나머지만 받는다 —
+`agent.text.delta`가 모델 출력 전문을 나르고, 코드를 고칠 수 없는 에이전트가 대화
+전문까지 받을 이유는 없다. `EventSubscriber::topics()`는 구독자 **자신의** 선호라
+(기본값이 "전부") 이 grant가 유일한 결정권자다. 자세한 것은
+[`architecture.md` §11-10](./architecture.md).
+
 > **⚠ `network` 열은 아직 어느 프로파일에서도 강제되지 않는다.** 그리고 Phase 2 기준으로
 > 프로파일은 **provider 호출과 도구 egress를 구분하지 못한다.**
 >
@@ -399,11 +406,11 @@ rivet --profile readonly "왜 이 테스트가 실패하지?"
 > 정직하지 않다면(주긴 주는데 강제하지 않는다), 이 열은 이쪽 방향으로 정직하지 않다:
 > 표가 약속하는 것을 아무도 주지 않는다.
 >
-> 같은 이유로 `SecretsRead` · `EventsSubscribe` · `JobManage`도 주는 프로파일이 없다.
-> 넷 다 어휘에는 있고 매니페스트에 적을 수 있으며 — `secrets_read`는 파서가 비어 있지
-> 않은 키 목록까지 요구한다 — 교집합에서 전부 사라진다. 표의 이 칸들은 **그렇게 되어야
-> 한다**는 진술이지 지금의 상태가 아니다. 어느 프로파일이 무엇을 주는지 정하는 것은
-> 정리가 아니라 보안 결정이므로, 요청자가 생기는 Phase(구독은 3, 시크릿·프로세스는 4)
+> 같은 이유로 `SecretsRead` · `JobManage`도 주는 프로파일이 없다. 셋 다 어휘에는 있고
+> 매니페스트에 적을 수 있으며 — `secrets_read`는 파서가 비어 있지 않은 키 목록까지
+> 요구한다 — 교집합에서 전부 사라진다. 표의 이 칸들은 **그렇게 되어야 한다**는 진술이지
+> 지금의 상태가 아니다. 어느 프로파일이 무엇을 주는지 정하는 것은
+> 정리가 아니라 보안 결정이므로, 요청자가 생기는 Phase(시크릿·프로세스는 4)
 > 착수 시점에 명시적으로 연다. [`architecture.md`](./architecture.md) §11-10.
 
 ---

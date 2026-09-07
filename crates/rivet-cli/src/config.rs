@@ -235,11 +235,43 @@ impl Profile {
             // anything until Phase 4's sandbox; see the footnote on that document's
             // profile table.
             Permission::NetworkHttp(None),
+            Permission::EventsSubscribe(self.subscribable_topics()),
         ];
         if self.writable() {
             granted.push(Permission::FsWrite(FsScope::Workspace));
         }
         PermissionSet::new(granted)
+    }
+
+    /// Which event topics a plugin of this profile may subscribe to.
+    ///
+    /// `None` is every topic. The narrowed profiles get everything except `agent.text`,
+    /// which streams the model's output verbatim — a plugin that may not write code has no
+    /// business receiving the whole conversation, and `EventSubscriber::topics()` is the
+    /// subscriber's own preference, so this grant is the only thing that decides it.
+    ///
+    /// The exclusion is spelled by naming `agent.text`'s siblings because topic scopes are
+    /// prefixes and prefixes cannot express "not". That is worth the verbosity: a topic
+    /// added under `agent.` later — a prompt echo, say — is **not** granted until somebody
+    /// adds it here, so the list fails closed rather than widening on its own.
+    fn subscribable_topics(self) -> Option<Vec<String>> {
+        match self {
+            Self::Developer | Self::Ci => None,
+            Self::ReadOnly | Self::Reviewer | Self::Production => Some(
+                [
+                    "agent.request.",
+                    "agent.run.",
+                    "agent.turn.",
+                    "job.",
+                    "plugin.",
+                    "runtime.",
+                    "tool.",
+                ]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            ),
+        }
     }
 
     /// Whether this profile alone means nobody can answer an approval prompt.
@@ -519,6 +551,40 @@ fn selection(enabled: &[String]) -> rivet_core::Result<PluginSelection> {
 
 #[cfg(test)]
 mod tests {
+    /// The decision recorded in `architecture.md` §11-10: who may subscribe, and to what.
+    #[test]
+    fn only_the_writable_profiles_may_subscribe_to_the_model_output() {
+        use rivet_core::capability::Permission;
+        let text = Permission::EventsSubscribe(Some(vec!["agent.text.".into()]));
+        let lifecycle = Permission::EventsSubscribe(Some(vec!["tool.execute.".into()]));
+
+        for profile in [super::Profile::Developer, super::Profile::Ci] {
+            let granted = profile.permissions();
+            assert!(
+                granted.allows(&text),
+                "{} must see everything",
+                profile.name()
+            );
+        }
+        for profile in [
+            super::Profile::ReadOnly,
+            super::Profile::Reviewer,
+            super::Profile::Production,
+        ] {
+            let granted = profile.permissions();
+            assert!(
+                !granted.allows(&text),
+                "{} must not receive the model's output",
+                profile.name()
+            );
+            assert!(
+                granted.allows(&lifecycle),
+                "{} still needs telemetry",
+                profile.name()
+            );
+        }
+    }
+
     use super::*;
 
     fn write_config(dir: &Path, body: &str) -> PathBuf {

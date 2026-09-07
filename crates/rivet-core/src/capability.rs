@@ -95,8 +95,13 @@ pub enum Permission {
     SessionRead,
     /// Append to the session event log.
     SessionWrite,
-    /// Subscribe to the event bus.
-    EventsSubscribe,
+    /// Subscribe to the event bus. `None` means every topic; otherwise an allowlist of
+    /// topic **prefixes**, matched the way [`crate::event::topic_matches`] matches them.
+    ///
+    /// Scoped because [`crate::event::EventSubscriber::topics`] is the subscriber's own
+    /// preference — it defaults to "everything" and nothing checks it. Without a scope
+    /// here the grant is all-or-nothing, and `agent.text` carries the model's output.
+    EventsSubscribe(Option<Vec<String>>),
     /// Publish onto the event bus.
     EventsPublish,
     /// Read named secrets, by key.
@@ -192,6 +197,13 @@ impl Permission {
                     HostMeet::Disjoint => None,
                 }
             }
+            (Self::EventsSubscribe(a), Self::EventsSubscribe(b)) => {
+                match meet_topics(a.as_deref(), b.as_deref()) {
+                    TopicMeet::AllTopics => Some(Self::EventsSubscribe(None)),
+                    TopicMeet::Topics(topics) => Some(Self::EventsSubscribe(Some(topics))),
+                    TopicMeet::Disjoint => None,
+                }
+            }
             (Self::SecretsRead(a), Self::SecretsRead(b)) => {
                 let keys = intersect_sorted(a, b);
                 if keys.is_empty() {
@@ -248,6 +260,48 @@ fn meet_allowlist(a: Option<&[String]>, b: Option<&[String]>) -> HostMeet {
                 HostMeet::Disjoint
             } else {
                 HostMeet::Hosts(hosts)
+            }
+        }
+    }
+}
+
+/// The result of meeting two topic scopes. Same three-way shape as [`HostMeet`], and for
+/// the same reason: "no restriction" and "no overlap" are opposites.
+enum TopicMeet {
+    AllTopics,
+    Topics(Vec<String>),
+    Disjoint,
+}
+
+/// `None` means "every topic". Otherwise the operands are **prefixes**, so this is not the
+/// set intersection [`meet_allowlist`] computes for hosts.
+///
+/// Two prefixes admit a common topic only when one is a prefix of the other, and then the
+/// longer one is exactly the set of topics both allow: `tool.` met with `tool.execute.` is
+/// `tool.execute.`, while `tool.` met with `run.` is nothing. Taking the string
+/// intersection instead would drop `tool.execute.` on the floor and silently widen or
+/// narrow depending on which side spelled what.
+fn meet_topics(a: Option<&[String]>, b: Option<&[String]>) -> TopicMeet {
+    match (a, b) {
+        (None, None) => TopicMeet::AllTopics,
+        (None, Some(list)) | (Some(list), None) => TopicMeet::Topics(list.to_vec()),
+        (Some(x), Some(y)) => {
+            let mut topics = Vec::new();
+            for p in x {
+                for q in y {
+                    if q.starts_with(p.as_str()) {
+                        topics.push(q.clone());
+                    } else if p.starts_with(q.as_str()) {
+                        topics.push(p.clone());
+                    }
+                }
+            }
+            topics.sort();
+            topics.dedup();
+            if topics.is_empty() {
+                TopicMeet::Disjoint
+            } else {
+                TopicMeet::Topics(topics)
             }
         }
     }
@@ -332,6 +386,46 @@ impl PermissionSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Topic scopes are prefixes, so their meet is not the set intersection hosts get.
+    #[test]
+    fn topic_scopes_meet_on_the_narrower_prefix() {
+        let all = Permission::EventsSubscribe(None);
+        let tools = Permission::EventsSubscribe(Some(vec!["tool.".into()]));
+        let executes = Permission::EventsSubscribe(Some(vec!["tool.execute.".into()]));
+        let runs = Permission::EventsSubscribe(Some(vec!["run.".into()]));
+
+        // Unrestricted meets a list to that list, in either order.
+        assert_eq!(all.meet(&tools), Some(tools.clone()));
+        assert_eq!(tools.meet(&all), Some(tools.clone()));
+
+        // The longer prefix is exactly the set both admit -- a string intersection would
+        // have dropped it and silently widened the grant to `tool.`.
+        assert_eq!(tools.meet(&executes), Some(executes.clone()));
+        assert_eq!(executes.meet(&tools), Some(executes));
+
+        // Prefixes that admit no common topic overlap in nothing.
+        assert_eq!(tools.meet(&runs), None);
+    }
+
+    /// The property the `reviewer` profile is granted for: `agent.text` must not be
+    /// reachable through a grant that names its siblings.
+    #[test]
+    fn a_sibling_prefix_does_not_admit_agent_text() {
+        let narrowed = Permission::EventsSubscribe(Some(vec![
+            "agent.request.".into(),
+            "agent.run.".into(),
+            "agent.turn.".into(),
+        ]));
+        let wants_text = Permission::EventsSubscribe(Some(vec!["agent.text.".into()]));
+        assert_eq!(narrowed.meet(&wants_text), None);
+
+        let set = PermissionSet::new(vec![narrowed]);
+        assert!(!set.allows(&wants_text));
+        assert!(set.allows(&Permission::EventsSubscribe(Some(vec![
+            "agent.run.completed".into()
+        ]))));
+    }
 
     #[test]
     fn zero_major_treats_every_minor_as_breaking() {

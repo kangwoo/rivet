@@ -127,7 +127,14 @@ fn permission_from_raw(
         "process_spawn" => scopeless(Permission::ProcessSpawn, name, scope, origin),
         "session_read" => scopeless(Permission::SessionRead, name, scope, origin),
         "session_write" => scopeless(Permission::SessionWrite, name, scope, origin),
-        "events_subscribe" => scopeless(Permission::EventsSubscribe, name, scope, origin),
+        // Like `network_http`: an absent scope is the widest grant, so it cannot be
+        // spelled as an empty list. Unlike it, the entries are topic prefixes.
+        "events_subscribe" => match scope {
+            None => Ok(Permission::EventsSubscribe(None)),
+            Some(value) => Ok(Permission::EventsSubscribe(Some(topic_list(
+                name, value, origin,
+            )?))),
+        },
         "events_publish" => scopeless(Permission::EventsPublish, name, scope, origin),
         "job_manage" => scopeless(Permission::JobManage, name, scope, origin),
         other => Err(bad(
@@ -135,6 +142,30 @@ fn permission_from_raw(
             format!("unknown permission `{other}`; expected one of {PERMISSION_NAMES}"),
         )),
     }
+}
+
+/// A topic-prefix allowlist.
+///
+/// Rejects an empty prefix as well as an empty list: `""` matches every topic, so a grant
+/// spelling it would read as narrow and behave as `None`. That is the same trap
+/// `FsScope::subtree` rejects for `..`.
+fn topic_list(
+    name: &str,
+    value: &toml::Value,
+    origin: Option<&Origin>,
+) -> rivet_core::Result<Vec<String>> {
+    let topics = host_list(name, value, origin)?;
+    if topics.iter().any(String::is_empty) {
+        return Err(bad(
+            origin,
+            format!(
+                "permission `{name}` has an empty topic prefix in its `scope`; \
+                 an empty prefix matches every topic, so it grants what leaving \
+                 `scope` out grants"
+            ),
+        ));
+    }
+    Ok(topics)
 }
 
 fn fs_scope(
@@ -347,11 +378,41 @@ permission = "job_manage"
                 Permission::ProcessSpawn,
                 Permission::SessionRead,
                 Permission::SessionWrite,
-                Permission::EventsSubscribe,
+                Permission::EventsSubscribe(None),
                 Permission::EventsPublish,
                 Permission::JobManage,
             ]
         );
+    }
+
+    #[test]
+    fn events_subscribe_takes_a_topic_allowlist() {
+        let manifest = with(
+            "[[permissions]]\n\
+             permission = \"events_subscribe\"\n\
+             scope = [\"tool.\", \"agent.run.\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.permissions,
+            [Permission::EventsSubscribe(Some(vec![
+                "tool.".into(),
+                "agent.run.".into()
+            ]))]
+        );
+    }
+
+    #[test]
+    fn an_empty_topic_prefix_is_refused() {
+        // `""` matches every topic, so a manifest spelling it would look narrow and behave
+        // like leaving `scope` out entirely.
+        let err = with(
+            "[[permissions]]\n\
+             permission = \"events_subscribe\"\n\
+             scope = [\"tool.\", \"\"]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("empty topic prefix"), "{err}");
     }
 
     #[test]

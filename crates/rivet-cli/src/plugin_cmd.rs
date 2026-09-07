@@ -214,7 +214,10 @@ fn describe(permission: &Permission) -> String {
         Permission::NetworkHttp(Some(hosts)) => format!("network_http({})", hosts.join(" ")),
         Permission::SessionRead => "session_read".to_string(),
         Permission::SessionWrite => "session_write".to_string(),
-        Permission::EventsSubscribe => "events_subscribe".to_string(),
+        Permission::EventsSubscribe(None) => "events_subscribe(all topics)".to_string(),
+        Permission::EventsSubscribe(Some(topics)) => {
+            format!("events_subscribe({})", topics.join(" "))
+        }
         Permission::EventsPublish => "events_publish".to_string(),
         Permission::SecretsRead(keys) => format!("secrets_read({})", keys.join(" ")),
         Permission::JobManage => "job_manage".to_string(),

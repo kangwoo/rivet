@@ -697,24 +697,40 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    가리키게 됐다. **Phase 4의 sandbox가 이걸 물려받기 전에 의도적으로 다시 열어야 한다** —
    provider 호출을 막는 프로파일이 필요하면 별도 permission이 필요하고 그건 `rivet-core`
    변경이다. 근거: [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) §7-1.
-10. **어느 프로파일도 주지 않는 permission이 넷이다** — `ProcessSpawn` · `SecretsRead` ·
-   `EventsSubscribe` · `JobManage`. `Profile::permissions()`가 주는 것은
-   `fs_read(workspace)` · `session_read` · `session_write` · `events_publish` ·
-   `network_http`, 그리고 쓰기 프로파일의 `fs_write(workspace)`뿐이다. Phase 2 전에는
-   교집합이 아무 데도 쓰이지 않아 무해했지만, 이제는 이 넷 중 하나를 선언한 매니페스트가
-   **모든 프로파일에서** 빈 권한이 된다.
-   - `EventsSubscribe` — **Phase 3의 `telemetry.log` plugin이 첫날 막힌다.**
+10. **어느 프로파일도 주지 않는 permission이 셋이다** — `ProcessSpawn` · `SecretsRead` ·
+   `JobManage`. 넷이었고, `EventsSubscribe`는 **Phase 3 착수 전에 닫았다** (아래).
    - `ProcessSpawn` — `security.md` §8 표는 `developer`·`ci`에 `process ✓`를 약속하지만
-     주는 쪽이 없다. `plugin.md` §4.2가 "권한이 없으면 크게 실패한다"의 예로 `tool-shell`을
-     들었었는데, 그렇게 쓰면 그 plugin은 `developer`에서도 로드되지 않는다.
+     주는 쪽이 없다. Phase 4(샌드박스)가 요청자다.
    - `SecretsRead` — 파서가 비어 있지 않은 키 목록을 요구해 완성된 기능처럼 읽힌다.
      저장·주입 경로는 §11-6대로 Phase 4 미설계다.
    - `JobManage` — Phase 5까지 요청자가 없다.
 
-   어느 프로파일이 무엇을 주는지는 정리가 아니라 보안 결정이므로 요청자가 생기는 Phase
-   착수 시점(구독은 3, 시크릿·프로세스는 4)에 명시적으로 연다. 그때까지 문서 세 곳
-   (`security.md` §8 각주, `plugin.md` §4.2, 여기)이 같은 사실을 말한다. 근거: 같은 문서
-   §7-3, PR #1 리뷰 2라운드 finding 2.
+   어느 프로파일이 무엇을 주는지는 정리가 아니라 보안 결정이므로, 남은 셋도 요청자가
+   생기는 Phase 착수 시점에 같은 방식으로 연다. 근거: PR #1 리뷰 2라운드 finding 2.
+
+   **`EventsSubscribe`는 해결됐다 (Phase 3 착수 전).** 두 가지를 정했다.
+
+   첫째, **permission이 scope를 갖는다** — `EventsSubscribe(Option<Vec<String>>)`,
+   토픽 **접두사** 목록이고 `None`이 전체다. 어휘 안에서 내용을 나르는 나머지
+   (`FsRead` · `NetworkHttp` · `SecretsRead`)는 전부 scope를 다는데 이것만 맨몸이었고,
+   `EventSubscriber::topics()`는 **구독자 자신의 선호**라 기본값이 "전부"다. 즉 scope가
+   없으면 이 권한은 all-or-nothing이었고, `agent.text.delta`는 모델 출력 전문을 나른다.
+
+   호스트 allowlist의 meet을 그대로 쓸 수 없다는 점이 이 결정의 실질이다. 호스트는 정확
+   일치지만 토픽은 접두사이므로, 두 접두사가 공통 토픽을 가지려면 **한쪽이 다른 쪽의
+   접두사여야 하고 그때 긴 쪽이 답이다** — `tool.` ⊓ `tool.execute.` = `tool.execute.`,
+   `tool.` ⊓ `run.` = 없음. 문자열 교집합을 취했다면 `tool.execute.`를 버리고 어느 쪽이
+   무엇을 적었느냐에 따라 조용히 넓히거나 좁혔을 것이다.
+
+   둘째, **누가 무엇을 받는가.** `developer`·`ci`는 `None`(전체). `readonly`·`reviewer`·
+   `production`은 `agent.text`를 뺀 나머지다 — 코드를 고칠 수 없는 에이전트가 대화 전문을
+   받을 이유가 없다. 접두사는 부정을 표현할 수 없으므로 `agent.text`의 형제를 열거해
+   뺐고, 그 대가로 **`agent.` 밑에 새 토픽이 생기면 누가 여기 추가하기 전까지는 주어지지
+   않는다** — 목록이 닫히는 쪽으로 실패한다.
+
+   호스트 자신의 소비자(`--jsonl` 렌더러, Phase 3의 TUI)는 `bus.attach()`를 직접 부르며
+   이 권한을 거치지 않는다. 호스트는 plugin이 아니고, 그 둘을 무엇이 제약하는지는
+   프로파일이 아니라 CLI를 실행한 사람이다.
 11. **`Interceptor`에 대응하는 `CapabilityKind`가 없다** — manifest guard가
    `register_interceptor`를 선언된 슬롯에 매핑할 수 없어 잠정적으로 `capabilities = ["policy"]`를
    요구한다. 변형을 추가하는 것은 닫힌 어휘를 넓히는 `rivet-core` 변경이라 Phase 2 범위 밖으로
