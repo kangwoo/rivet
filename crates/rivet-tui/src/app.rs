@@ -17,11 +17,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind};
 use rivet_core::event::{EventEnvelope, EventSubscriber};
-use tokio::sync::mpsc;
+use rivet_core::policy::{ApprovalOutcome, ApprovalRequest, ApprovalSink};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::draw::draw;
-use crate::state::{AppState, Panel};
+use crate::state::{AppState, ApprovalView, Panel};
 
 /// How often the screen is redrawn, and how long a key press may wait.
 const TICK: Duration = Duration::from_millis(50);
@@ -39,6 +40,12 @@ pub enum Intent {
 pub struct Tui {
     state: Mutex<AppState>,
     intents: mpsc::Sender<Intent>,
+    /// Where a key press sends the answer to the approval currently on screen.
+    ///
+    /// Separate from [`AppState`] on purpose: the state is a value the drawing code clones
+    /// and a test builds by hand, and a one-shot sender is neither cloneable nor something a
+    /// test should have to construct to draw a modal.
+    answer: Mutex<Option<oneshot::Sender<ApprovalOutcome>>>,
 }
 
 impl fmt::Debug for Tui {
@@ -56,6 +63,7 @@ impl Tui {
             Self {
                 state: Mutex::new(AppState::default()),
                 intents,
+                answer: Mutex::new(None),
             },
             rx,
         )
@@ -143,11 +151,51 @@ impl Tui {
         }
     }
 
+    /// Answer the approval on screen, if a key asked for one.
+    ///
+    /// Returns whether the key was consumed. A failed `send` means the dispatcher stopped
+    /// waiting — the run was cancelled, or its deadline passed — and clearing `pending` on
+    /// that failure is what keeps an unanswerable modal off the screen.
+    fn answer_approval(&self, key: KeyEvent) -> bool {
+        let outcome = {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(pending) = state.pending.as_ref() else {
+                return false;
+            };
+            match key.code {
+                KeyCode::Char('y') => ApprovalOutcome::Approved,
+                KeyCode::Char('a') if pending.allow_remember => ApprovalOutcome::ApprovedForSession,
+                KeyCode::Char('n') | KeyCode::Esc => ApprovalOutcome::Denied,
+                _ => return false,
+            }
+        };
+
+        let sender = self
+            .answer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let delivered = sender.is_some_and(|sender| sender.send(outcome).is_ok());
+        if !delivered {
+            self.state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pending = None;
+        }
+        true
+    }
+
     /// Map one key press.
     fn handle_key(&self, key: KeyEvent) {
         // Only presses. A terminal in raw mode also reports releases and repeats, and
         // acting on all three sends `Cancel` up to three times per Ctrl-C.
         if key.kind != KeyEventKind::Press {
+            return;
+        }
+        // Ctrl-C is never taken by the modal: cancelling the run is what clears it, through
+        // the dispatcher giving up on the answer. An approval prompt that swallowed the one
+        // key a stuck user reaches for would be worse than no prompt.
+        if !matches!(key.code, KeyCode::Char('c')) && self.answer_approval(key) {
             return;
         }
         let intent = match (key.code, key.modifiers) {
@@ -192,6 +240,38 @@ async fn read_key(timeout: Duration) -> std::io::Result<Option<KeyEvent>> {
     })
     .await
     .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+}
+
+#[async_trait]
+impl ApprovalSink for Tui {
+    /// Put the prompt on screen and wait for a key.
+    ///
+    /// No timeout of its own: the run's deadline already reaches the dispatcher, which drops
+    /// the receiver when it gives up. The next key press then fails to send, and that
+    /// failure is what clears the modal — so the screen never keeps a prompt nobody is
+    /// listening for.
+    async fn request(&self, request: ApprovalRequest) -> rivet_core::Result<ApprovalOutcome> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.pending = Some(ApprovalView {
+                reason: request.reason,
+                preview: request.preview,
+                allow_remember: request.allow_remember,
+            });
+        }
+        *self.answer.lock().unwrap_or_else(PoisonError::into_inner) = Some(sender);
+
+        let outcome = receiver.await;
+        {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.pending = None;
+        }
+        *self.answer.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        outcome.map_err(|_| {
+            rivet_core::Error::cancelled("the approval prompt was closed before it was answered")
+        })
+    }
 }
 
 #[async_trait]
@@ -311,6 +391,131 @@ mod tests {
             rendered.contains("shutting down"),
             "the frame the user is left looking at predates the end of the run: {rendered}"
         );
+    }
+
+    // --- the approval round trip ---------------------------------------------------------
+
+    fn ask(allow_remember: bool) -> rivet_core::policy::ApprovalRequest {
+        rivet_core::policy::ApprovalRequest {
+            id: rivet_core::id::ApprovalId::new(),
+            session_id: rivet_core::id::SessionId::new(),
+            reason: "the command matches the destructive shape `rm -rf`".into(),
+            preview: "rm -rf build".into(),
+            allow_remember,
+            scope_key: "shell:rm".into(),
+        }
+    }
+
+    fn press(code: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(code), crossterm::event::KeyModifiers::NONE)
+    }
+
+    async fn wait_for_pending(tui: &Tui) {
+        for _ in 0..500 {
+            if tui.snapshot().pending.is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("the prompt never reached the screen");
+    }
+
+    #[tokio::test]
+    async fn the_keys_map_to_the_three_outcomes() {
+        for (key, expected) in [
+            ('y', ApprovalOutcome::Approved),
+            ('a', ApprovalOutcome::ApprovedForSession),
+            ('n', ApprovalOutcome::Denied),
+        ] {
+            let (tui, _intents) = Tui::new();
+            let tui = std::sync::Arc::new(tui);
+            let asking = {
+                let tui = tui.clone();
+                tokio::spawn(async move { tui.request(ask(true)).await })
+            };
+            wait_for_pending(&tui).await;
+            tui.handle_key(press(key));
+
+            assert_eq!(
+                asking.await.expect("the task joins").expect("answered"),
+                expected,
+                "key `{key}`"
+            );
+            assert!(
+                tui.snapshot().pending.is_none(),
+                "an answered prompt leaves the screen"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_remember_key_is_inert_when_the_policy_did_not_offer_it() {
+        // The shell gate is never rememberable. A prompt that honored `a` anyway would hand
+        // out a session-long grant the policy refused to give.
+        let (tui, _intents) = Tui::new();
+        let tui = std::sync::Arc::new(tui);
+        let asking = {
+            let tui = tui.clone();
+            tokio::spawn(async move { tui.request(ask(false)).await })
+        };
+        wait_for_pending(&tui).await;
+
+        tui.handle_key(press('a'));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !asking.is_finished(),
+            "`a` answered a prompt that never offered it"
+        );
+
+        tui.handle_key(press('n'));
+        assert_eq!(
+            asking.await.expect("the task joins").expect("answered"),
+            ApprovalOutcome::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_receiver_clears_the_pending_modal() {
+        // The dispatcher gave up first -- the run was cancelled, or its deadline passed --
+        // so the answer has nowhere to go. A screen that kept the prompt would be asking a
+        // question nobody is listening for.
+        let (tui, _intents) = Tui::new();
+        let tui = std::sync::Arc::new(tui);
+        let asking = {
+            let tui = tui.clone();
+            tokio::spawn(async move { tui.request(ask(true)).await })
+        };
+        wait_for_pending(&tui).await;
+
+        asking.abort();
+        let _ = asking.await;
+
+        tui.handle_key(press('y'));
+        assert!(
+            tui.snapshot().pending.is_none(),
+            "the failed send is the signal that clears it"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_is_never_swallowed_by_the_modal() {
+        // Ctrl-C is the key a stuck user reaches for. A prompt that ate it would make the
+        // approval modal the one place in the UI where a run cannot be stopped.
+        let (tui, mut intents) = Tui::new();
+        let tui = std::sync::Arc::new(tui);
+        let asking = {
+            let tui = tui.clone();
+            tokio::spawn(async move { tui.request(ask(true)).await })
+        };
+        wait_for_pending(&tui).await;
+
+        tui.handle_key(press('c'));
+        assert_eq!(intents.try_recv().expect("an intent"), Intent::Cancel);
+        assert!(
+            tui.snapshot().pending.is_some(),
+            "the run's own cancellation path is what clears it, not this key"
+        );
+        asking.abort();
     }
 
     #[tokio::test]

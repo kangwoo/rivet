@@ -137,16 +137,19 @@ async fn plugin_show_for_an_unknown_id_lists_the_ones_that_exist() {
 #[tokio::test]
 async fn an_enabled_id_this_build_does_not_provide_fails_at_startup() {
     // The Phase 1 "warn and skip" middle category is gone: an id either loads or is a typo.
+    //
+    // The fixture was `rivet.tool-shell` until Phase 4 shipped it. `acme.` is a namespace
+    // this repository never provides, so it stays a typo whatever a later phase adds.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("rivet.toml"),
-        "[plugins]\nenabled = [\"rivet.tool-shell\"]\n",
+        "[plugins]\nenabled = [\"acme.tool-nonesuch\"]\n",
     )
     .unwrap();
 
     let (code, _stdout, stderr) = run_in(dir.path(), &["doctor"]).await;
     assert_eq!(code, 2, "a configuration problem is exit code 2: {stderr}");
-    assert!(stderr.contains("rivet.tool-shell"), "{stderr}");
+    assert!(stderr.contains("acme.tool-nonesuch"), "{stderr}");
     assert!(
         stderr.contains("rivet.tool-filesystem"),
         "and it says what is available: {stderr}"

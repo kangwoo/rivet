@@ -332,7 +332,8 @@ impl PluginRegistry for GuardedRegistry {
     /// `CapabilityKind` has no `Interceptor` variant, so an interceptor is declared as
     /// `policy`: both answer "may this tool call proceed", and widening the closed
     /// vocabulary is a `rivet-core` change Phase 2's scope boundary rules out. Worth
-    /// revisiting in Phase 4, when interceptors actually run.
+    /// revisiting whenever a plugin actually registers an interceptor; Phase 4 built the
+    /// execution path for them and shipped none.
     async fn register_interceptor(
         &self,
         interceptor: Arc<dyn Interceptor>,

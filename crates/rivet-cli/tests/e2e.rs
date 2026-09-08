@@ -816,3 +816,296 @@ async fn ctrl_c_stops_an_in_flight_tool_and_exits_130() {
         "a cancelled run still closes its own log: {events:?}"
     );
 }
+
+// --- Phase 4: the policy chain, approvals, and the sandbox, through the real binary ---------
+
+/// The full Phase 4 stack, plus `tool-git`, for the tests that reach a git tool.
+const PHASE_4_PLUGINS_WITH_GIT: [&str; 6] = [
+    "rivet.model-openai",
+    "rivet.tool-filesystem",
+    "rivet.policy-default",
+    "rivet.sandbox-local",
+    "rivet.tool-shell",
+    "rivet.tool-git",
+];
+
+/// The full Phase 4 stack, as the shipped example enables it.
+const PHASE_4_PLUGINS: [&str; 5] = [
+    "rivet.model-openai",
+    "rivet.tool-filesystem",
+    "rivet.policy-default",
+    "rivet.sandbox-local",
+    "rivet.tool-shell",
+];
+
+#[tokio::test]
+async fn headless_refuses_a_destructive_command_without_hanging() {
+    // The plan's own manual check — `rivet --headless "rm -rf /"` — as a test, which is what
+    // the task allows in place of running it by hand. What matters is *both* halves: the
+    // process ends inside a wall-clock bound, and the log says the call was refused rather
+    // than that it ran.
+    let provider = Provider::start(vec![
+        sse_tool_call("shell", &serde_json::json!({ "command": "rm -rf /" })),
+        sse_text("I cannot do that without approval."),
+    ])
+    .await;
+    let workspace = Workspace::new(&provider.base_url);
+    workspace.enable_plugins(&PHASE_4_PLUGINS);
+
+    let started = Instant::now();
+    let (code, _stdout, stderr) = tokio::time::timeout(
+        Duration::from_secs(30),
+        workspace.run(&["--headless", "delete everything"]),
+    )
+    .await
+    .expect("`--headless` must never wait for a human; a timeout here is the bug");
+    assert_eq!(code, 0, "the run ends normally, having refused: {stderr}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "took {:?}",
+        started.elapsed()
+    );
+
+    let events = workspace.session_events();
+    assert!(
+        events.contains(&"approval.requested".to_string()),
+        "the attempt is on the record even though nobody was asked: {events:?}"
+    );
+    assert!(
+        events.contains(&"approval.resolved".to_string()),
+        "{events:?}"
+    );
+    assert!(events.contains(&"tool.blocked".to_string()), "{events:?}");
+    assert!(
+        !events.contains(&"tool.called".to_string()),
+        "nothing ran: {events:?}"
+    );
+
+    // And the model was told why, so it can answer rather than retry.
+    let requests = provider.requests().await;
+    let results = tool_results(&requests[1]);
+    assert!(
+        results.iter().any(|r| r.contains("Blocked by policy")),
+        "the model has to see the reason: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn readonly_offers_no_write_tool_and_the_model_is_told() {
+    // The plan's other manual check — `rivet --profile readonly "delete all logs"` — as a
+    // test. Two layers, and this exercises the outer one end to end: the tool is not in the
+    // list the model is given, and asking for it anyway comes back as an error result rather
+    // than as a run that ended.
+    let provider = Provider::start(vec![
+        sse_tool_call(
+            "write_file",
+            &serde_json::json!({ "path": "src/main.rs", "content": "" }),
+        ),
+        sse_text("I cannot write files in this profile."),
+    ])
+    .await;
+    let workspace = Workspace::new(&provider.base_url);
+    workspace.enable_plugins(&PHASE_4_PLUGINS);
+
+    let (code, _stdout, stderr) = workspace
+        .run(&["--profile", "readonly", "delete all logs"])
+        .await;
+    assert_eq!(code, 0, "the model adapts; the run does not end: {stderr}");
+
+    let requests = provider.requests().await;
+    let offered: Vec<String> = requests[0]["tools"]
+        .as_array()
+        .expect("a tool list")
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
+        .collect();
+    assert!(offered.contains(&"read_file".to_string()), "{offered:?}");
+    assert!(
+        !offered.contains(&"write_file".to_string()),
+        "a tool that is never registered is never offered: {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"shell".to_string()),
+        "and `shell` needs write access, which this profile does not grant: {offered:?}"
+    );
+
+    let results = tool_results(&requests[1]);
+    assert!(
+        results.iter().any(|r| r.contains("unknown tool")),
+        "asking anyway is an error result the model reads: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn doctor_is_healthy_when_no_loaded_plugin_can_spawn() {
+    // The harness's own configuration: a model and the file tools, and no sandbox provider.
+    // Nothing here can start a process, so nothing here is missing one. Four older `doctor`
+    // tests happen to rest on this; naming it means the next person to tighten the rule
+    // fails a test that says what it was for.
+    let provider = Provider::start(vec![]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    let (code, stdout, stderr) = workspace.run(&["doctor"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("provider    local"), "{stdout}");
+    assert!(
+        stdout.contains("no loaded plugin may start a process"),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn doctor_is_healthy_under_production_even_though_no_sandbox_is_registered() {
+    // The most closed profile grants no `process_spawn`, so `sandbox-local` registers
+    // nothing there **by design**. A rule that called that a configuration error would make
+    // `--profile production` unable to exit 0 with any configuration at all.
+    let provider = Provider::start(vec![]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    workspace.enable_plugins(&PHASE_4_PLUGINS);
+
+    let (code, stdout, stderr) = workspace.run(&["--profile", "production", "doctor"]).await;
+    assert_eq!(
+        code, 0,
+        "the most closed profile has to be a configuration that works: {stderr}\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("+ tool:shell"),
+        "and it registers no shell: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn doctor_fails_when_a_process_capable_plugin_has_no_sandbox_provider() {
+    // The real misconfiguration: `shell` is loaded and can start processes, and the provider
+    // it would run under is not registered. Every one of its calls would be refused, so an
+    // operator should hear about it before the run rather than in a tool result.
+    let provider = Provider::start(vec![]).await;
+    let workspace = Workspace::new(&provider.base_url);
+    workspace.enable_plugins(&[
+        "rivet.model-openai",
+        "rivet.tool-filesystem",
+        "rivet.tool-shell",
+    ]);
+
+    let (code, stdout, stderr) = workspace.run(&["doctor"]).await;
+    assert_eq!(code, 2, "stderr: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("rivet.tool-shell"),
+        "it has to name who needs one: {stdout}"
+    );
+    assert!(
+        stdout.contains("not registered"),
+        "and what is missing: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn a_destructive_shell_command_is_gated_and_an_ordinary_one_is_not() {
+    // The gate is not "every shell call". A `developer` profile that had to approve `cargo
+    // test` would be a profile nobody keeps switched on -- and `docs/security.md` puts
+    // `developer` at "destructive operations only".
+    let provider = Provider::start(vec![
+        sse_tool_call("shell", &serde_json::json!({ "command": "echo hello" })),
+        sse_text("It printed hello."),
+    ])
+    .await;
+    let workspace = Workspace::new(&provider.base_url);
+    workspace.enable_plugins(&PHASE_4_PLUGINS);
+
+    let (code, _stdout, stderr) = workspace.run(&["--headless", "say hello"]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let events = workspace.session_events();
+    assert!(
+        events.contains(&"tool.called".to_string()),
+        "an ordinary command runs without asking anybody: {events:?}"
+    );
+    assert!(
+        !events.contains(&"approval.requested".to_string()),
+        "and nothing was gated: {events:?}"
+    );
+
+    // It really ran, through the sandbox, and the model saw the output.
+    let requests = provider.requests().await;
+    let results = tool_results(&requests[1]);
+    assert!(
+        results.iter().any(|r| r.contains("hello")),
+        "the command ran and its output reached the model: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_readonly_run_cannot_write_through_a_git_argument() {
+    // Acceptance criterion B, through the real binary, on the surface a build review found:
+    // `git --no-pager diff --output=../ESCAPED` exits 0 and writes a file above the working
+    // directory. From `git_diff`, which declares `read_only`, under `readonly`, which grants
+    // no `fs_write` at all.
+    //
+    // The unit tests prove the refusal; this proves the whole stack agrees -- schema
+    // validation lets the value through, the policy chain allows the call, and the tool
+    // refuses it before `git` is ever started -- and that the file is not there afterwards.
+    // The escape target is inside a second temporary directory this test owns, named
+    // absolutely. A relative `../ESCAPED` would land in the *shared* temp directory, where a
+    // leftover from another run -- or a test running beside this one -- would fail the
+    // assertion below for a reason that has nothing to do with the guard.
+    let outside = tempfile::tempdir().expect("a directory outside the workspace");
+    let escaped = outside.path().join("ESCAPED");
+
+    let provider = Provider::start(vec![
+        sse_tool_call(
+            "git_diff",
+            &serde_json::json!({ "rev": format!("--output={}", escaped.display()) }),
+        ),
+        sse_text("I cannot do that."),
+    ])
+    .await;
+    let workspace = Workspace::new(&provider.base_url);
+    workspace.enable_plugins(&PHASE_4_PLUGINS_WITH_GIT);
+
+    // A real repository with a real unstaged change, so `git diff` would have something to
+    // write. Without this the escape could not happen for an unrelated reason ("not a git
+    // repository") and the assertion below would hold vacuously.
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "src/main.rs"],
+        vec!["commit", "-qm", "one"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(workspace.path())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* changed */ }\n",
+    )
+    .expect("write");
+
+    let (code, _stdout, stderr) = workspace
+        .run(&["--profile", "readonly", "show me the diff"])
+        .await;
+    assert_eq!(code, 0, "the model adapts; the run does not end: {stderr}");
+
+    assert!(
+        !escaped.exists(),
+        "`git` wrote outside the workspace from a read-only profile: {}",
+        escaped.display()
+    );
+
+    let events = workspace.session_events();
+    assert!(
+        events.contains(&"tool.blocked".to_string()),
+        "the attempt is a durable fact, not a tool result that scrolls away: {events:?}"
+    );
+
+    // And the model was told, so it can rephrase rather than retry the same thing.
+    let requests = provider.requests().await;
+    let results = tool_results(&requests[1]);
+    assert!(
+        results.iter().any(|r| r.contains("Blocked by policy")),
+        "{results:?}"
+    );
+}

@@ -8,6 +8,7 @@
 //! which is what makes the *end* of the stream well defined: the host can say "deliver
 //! everything published, then stop" instead of sleeping and hoping.
 
+pub mod approve;
 pub mod human;
 pub mod jsonl;
 
@@ -25,9 +26,10 @@ use crate::render::jsonl::JsonlRenderer;
 pub enum Output {
     Human,
     Jsonl,
-    /// The full-screen UI. Opt-in in Phase 3: every Phase 1 end-to-end test asserts on the
-    /// human renderer's stdout/stderr split, and a TUI with no approval prompt is ahead of
-    /// Phase 4.4 anyway.
+    /// The full-screen UI. Still opt-in: every end-to-end test asserts on the human
+    /// renderer's stdout/stderr split, so making it the default would rewrite them all. As
+    /// of Phase 4 it is the only mode that answers an approval with a keypress instead of a
+    /// typed line — [`approve::PromptApprover`] is what the other two get.
     Tui,
 }
 

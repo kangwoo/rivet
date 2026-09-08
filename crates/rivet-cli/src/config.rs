@@ -44,9 +44,9 @@ pub struct FileConfig {
     pub plugins: PluginsSection,
     #[serde(default)]
     pub policy: PolicySection,
-    /// Parsed and carried, unused until Phase 4.
+    /// The confinement processes run under. Resolved since Phase 4.
     #[serde(default)]
-    pub sandbox: toml::Table,
+    pub sandbox: SandboxSection,
     /// Parsed and carried, unused until Phase 5.
     #[serde(default)]
     pub job: toml::Table,
@@ -134,6 +134,25 @@ pub struct PluginsSection {
     pub settings: BTreeMap<String, toml::Value>,
 }
 
+/// The `[sandbox]` table.
+///
+/// One key for now. A provider name that nothing registered is **not** a startup error:
+/// only a call that actually starts a process fails, and it fails naming the provider. See
+/// `rivet_runtime::sandbox_scope`, and `rivet doctor` for the warning that comes first.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SandboxSection {
+    pub provider: String,
+}
+
+impl Default for SandboxSection {
+    fn default() -> Self {
+        Self {
+            provider: "local".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct PolicySection {
@@ -152,10 +171,11 @@ impl Default for PolicySection {
 
 /// What an operator's profile narrows.
 ///
-/// In Phase 1 a profile narrows the **agent's tool scope** — pipeline step 2 — and nothing
-/// else. It is not a policy: there is no policy chain until Phase 4, and `--profile
-/// readonly` must not be described as if it enforced something it does not. What it does
-/// do is real: a tool that is never registered is never offered to the model.
+/// Two things, since Phase 4. It narrows the **agent's tool scope** — pipeline step 2, so a
+/// tool that is never registered is never offered to the model — *and* it computes the
+/// grant the policy chain enforces at call time. The second half is what makes
+/// `--profile readonly` more than a smaller tool list: `default.grant` refuses a mutating
+/// call under a grant with no `fs_write`, whoever registered the tool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
     Developer,
@@ -227,11 +247,17 @@ impl Profile {
     pub fn tool_scope(self) -> Option<Vec<String>> {
         match self {
             Self::Developer | Self::Ci | Self::ReadOnly | Self::Production => None,
-            // A reviewer that can edit the code is not a reviewer.
+            // A reviewer that can edit the code is not a reviewer. Reading the history is
+            // not editing it: the three git commands added here are the read-only ones, and
+            // `git_commit` is deliberately absent -- `rivet.example.toml`'s own
+            // `[agents.reviewer]` already asks for `git_diff` and `git_log`.
             Self::Reviewer => Some(vec![
                 "read_file".to_string(),
                 "list_dir".to_string(),
                 "search".to_string(),
+                "git_status".to_string(),
+                "git_diff".to_string(),
+                "git_log".to_string(),
             ]),
         }
     }
@@ -251,16 +277,41 @@ impl Profile {
             // shared by tool plugins and model plugins, so withholding it here would deny
             // the provider call and leave no profile able to run an agent at all --
             // including `rivet --profile readonly "왜 이 테스트가 실패하지?"`, which
-            // `docs/security.md` gives as its own example. Tool egress is not enforced by
-            // anything until Phase 4's sandbox; see the footnote on that document's
-            // profile table.
+            // `docs/security.md` gives as its own example. Tool egress is **still** not
+            // enforced by anything: `sandbox-local` reports `network_isolation: false`, so
+            // Phase 4 inherited that gap rather than closing it. See `architecture.md`
+            // §11-9 and the footnote on that document's profile table.
             Permission::NetworkHttp(None),
             Permission::EventsSubscribe(self.subscribable_topics()),
         ];
         if self.writable() {
             granted.push(Permission::FsWrite(FsScope::Workspace));
         }
+        if self.may_spawn() {
+            granted.push(Permission::ProcessSpawn);
+        }
         PermissionSet::new(granted)
+    }
+
+    /// Whether a plugin under this profile may start a process.
+    ///
+    /// Everything except `production`, and that asymmetry is the point:
+    /// `docs/security.md` §8 puts `readonly` at "limited" and `reviewer` at "read commands
+    /// only", and the permission vocabulary has no way to say "read commands". So the
+    /// permission is granted to both and the **tools** carry the distinction — `tool-git`
+    /// registers its three reading commands on `process_spawn` alone and `git_commit` only
+    /// with `fs_write`, and `tool-shell` needs both. The result is that `readonly` and
+    /// `reviewer` get git reads and nothing else, which is what those two table cells meant.
+    ///
+    /// `production` gets no process at all, so `sandbox-local` registers nothing there and
+    /// no confinement can be asked for because nothing will be run.
+    ///
+    /// `docs/architecture.md` §11-10 asked for this to be opened deliberately, in the phase
+    /// that produced a requester. Phase 4's requesters are `sandbox-local`, `tool-shell` and
+    /// `tool-git`.
+    #[must_use]
+    pub fn may_spawn(self) -> bool {
+        !matches!(self, Self::Production)
     }
 
     /// Which event topics a plugin of this profile may subscribe to.
@@ -304,10 +355,13 @@ impl Profile {
     /// Whether this profile alone means nobody can answer an approval prompt.
     ///
     /// Only `ci`. `docs/security.md`'s profile table puts `production` in the column where
-    /// *everything* needs approval, so marking it unattended would, once Phase 4 wires
-    /// approvals up, silently auto-deny every approvable action rather than ask. The
-    /// operator checklist asks for `--headless` plus `ci` in CI, and that is what this
-    /// implements.
+    /// *everything* needs approval, so marking it unattended would auto-deny every
+    /// approvable action rather than ask — which, now that approvals are wired up, is no
+    /// longer hypothetical. The operator checklist asks for `--headless` plus `ci` in CI,
+    /// and that is what this implements.
+    ///
+    /// This is not the last word on the question. `run.rs` also folds in "is there anywhere
+    /// to ask" — a run with stdin on a pipe has nobody to answer, whatever the profile says.
     #[must_use]
     pub fn implies_unattended(self) -> bool {
         self == Self::Ci
@@ -330,13 +384,18 @@ pub enum PluginSelection {
     Only(Vec<PluginId>),
 }
 
-/// Sections a config may declare that Phase 1 parses but does not act on.
+/// Sections a config may declare that this build parses but does not act on.
 ///
-/// Reported by `rivet doctor` rather than ignored in silence: an operator who configured a
-/// sandbox should be told it is not enforcing anything yet.
+/// Reported by `rivet doctor` rather than ignored in silence: an operator who configured
+/// something should be told when it is not enforcing anything yet.
+///
+/// `[sandbox]` **left this struct in Phase 4.** The field carried two facts — that the
+/// section was parsed rather than dropped, and that nothing acted on it — and the second
+/// stopped being true. The first is now carried by [`Config::sandbox_provider`], which says
+/// more than the old flag did: not "the section was non-empty" but "this is the provider it
+/// resolved to".
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Inert {
-    pub sandbox: bool,
     pub job: bool,
     pub named_agents: Vec<String>,
 }
@@ -357,6 +416,12 @@ pub struct Config {
     pub plugins: PluginSelection,
     /// Per-plugin settings, as JSON, keyed by plugin id.
     pub plugin_settings: BTreeMap<String, serde_json::Value>,
+    /// The `[sandbox] provider` name, as the default confinement for every call.
+    ///
+    /// Carried as a plain name, and resolved against the registry per call rather than
+    /// here. An unregistered name blocks only the calls that start a process; see
+    /// `rivet_runtime::sandbox_scope`.
+    pub sandbox_provider: String,
     /// Configured sections that later phases will act on.
     pub inert: Inert,
 }
@@ -428,7 +493,6 @@ impl Config {
 
         let sessions_dir = workspace.root().join(SESSIONS_DIR);
         let inert = Inert {
-            sandbox: !file.sandbox.is_empty(),
             job: !file.job.is_empty(),
             // `[agents.*]` is parsed so a config declaring a reviewer still loads, but
             // Phase 1 has no way to select one -- and its `context_providers` names do not
@@ -442,11 +506,13 @@ impl Config {
             instructions: file.agent.instructions,
             limits: file.agent.limits.to_limits(),
             profile,
-            // `--headless` is not a no-op waiting for Phase 4: the value flows to exactly
-            // where `PolicyRequest.unattended` will read it, and `rivet doctor` shows it.
+            // What the *operator* said. Whether a human can actually be reached is
+            // `run.rs`'s to decide -- it knows the output mode and whether stdin is a
+            // terminal -- and it folds this in rather than replacing it.
             unattended: overrides.headless || profile.implies_unattended(),
             plugins,
             plugin_settings,
+            sandbox_provider: file.sandbox.provider,
             workspace,
             sessions_dir,
             inert,
@@ -752,7 +818,35 @@ mod tests {
             PluginSelection::Only(vec![
                 PluginId::new("rivet.model-openai").unwrap(),
                 PluginId::new("rivet.tool-filesystem").unwrap(),
-            ])
+                PluginId::new("rivet.policy-default").unwrap(),
+                PluginId::new("rivet.sandbox-local").unwrap(),
+                PluginId::new("rivet.tool-shell").unwrap(),
+                PluginId::new("rivet.tool-git").unwrap(),
+            ]),
+            "the example's list is carried through exactly as written; \
+             the host neither adds to it nor drops from it"
+        );
+
+        // *Why* those six is no longer self-evident from the literal, so the relation is
+        // asserted rather than copied: the example enables the default selection minus the
+        // context plugin, which is never optional. The example says the same thing in prose
+        // -- "the only difference is `telemetry-log`" -- and a Phase that adds a plugin to
+        // one side and forgets the other fails here first.
+        let PluginSelection::Only(enabled) = &config.plugins else {
+            panic!("the example writes an explicit list");
+        };
+        let listed: std::collections::BTreeSet<&str> =
+            enabled.iter().map(PluginId::as_str).collect();
+        let default_selection = crate::catalog::default_selection();
+        let defaulted: std::collections::BTreeSet<&str> = default_selection
+            .iter()
+            .map(PluginId::as_str)
+            .filter(|id| *id != crate::catalog::CONTEXT_PLUGIN_ID)
+            .collect();
+        assert_eq!(
+            listed, defaulted,
+            "sorted rather than compared as written: both sides are lists, and their \
+             orders differ for reasons that are not the property under test"
         );
     }
 
@@ -768,9 +862,9 @@ mod tests {
         write_config(dir.path(), &example);
         let config = Config::load(dir.path(), &Overrides::default()).unwrap();
         assert_eq!(config.inert.named_agents, ["reviewer"]);
-        assert!(
-            config.inert.sandbox,
-            "and the sandbox section is carried too"
+        assert_eq!(
+            config.sandbox_provider, "local",
+            "the sandbox section is carried, and now it resolves"
         );
     }
 
@@ -949,8 +1043,16 @@ mod tests {
         assert!(!Profile::Production.writable());
         assert_eq!(
             Profile::Reviewer.tool_scope().unwrap(),
-            ["read_file", "list_dir", "search"],
-            "a reviewer that can edit the code is not a reviewer"
+            [
+                "read_file",
+                "list_dir",
+                "search",
+                "git_status",
+                "git_diff",
+                "git_log"
+            ],
+            "a reviewer that can edit the code is not a reviewer -- and reading the \
+             history is not editing it, which is why `git_commit` is not on this list"
         );
         assert!(
             Profile::ReadOnly
@@ -968,6 +1070,72 @@ mod tests {
                 .allows(&Permission::NetworkHttp(None)),
             "the provider call is granted to every profile, or no profile can run an agent"
         );
+    }
+
+    #[test]
+    fn every_profile_says_whether_it_may_spawn_a_process() {
+        // The same shape as the topic tripwire, for the same reason: a profile added to the
+        // enum fails to compile here, and an arm added without a decision fails to run.
+        // `docs/architecture.md` §11-10 asked for this permission to be opened
+        // deliberately; this is the line that records which way each profile went.
+        let (mut may, mut may_not): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+        for profile in Profile::all() {
+            match profile {
+                Profile::Developer | Profile::Ci | Profile::ReadOnly | Profile::Reviewer => {
+                    may.push(profile.name());
+                }
+                Profile::Production => may_not.push(profile.name()),
+            }
+        }
+        assert_eq!(may, ["developer", "readonly", "reviewer", "ci"]);
+        assert_eq!(may_not, ["production"]);
+
+        for name in &may {
+            let profile = Profile::parse(name).unwrap();
+            assert!(profile.may_spawn(), "{name}");
+            assert!(
+                profile.permissions().contains(&Permission::ProcessSpawn),
+                "{name} says it may spawn but its grant does not carry it"
+            );
+        }
+        for name in &may_not {
+            let profile = Profile::parse(name).unwrap();
+            assert!(!profile.may_spawn(), "{name}");
+            assert!(
+                !profile.permissions().contains(&Permission::ProcessSpawn),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_readonly_profile_may_run_a_process_but_holds_no_write() {
+        // The pair that makes "read commands only" work: the permission is granted, and the
+        // tools that need write access are the ones a read-only grant does not get.
+        let readonly = Profile::ReadOnly.permissions();
+        assert!(readonly.contains(&Permission::ProcessSpawn));
+        assert!(!readonly.allows(&Permission::FsWrite(FsScope::Workspace)));
+    }
+
+    #[test]
+    fn an_absent_sandbox_section_still_resolves_to_a_provider() {
+        // A config with no `[sandbox]` is the common case, and it is not "no confinement":
+        // it is `local`, which is what every profile that can spawn will look up.
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[agent]\nmodel = \"openai/gpt-4o\"\n");
+        let config = Config::load(dir.path(), &Overrides::default()).unwrap();
+        assert_eq!(config.sandbox_provider, "local");
+    }
+
+    #[test]
+    fn a_named_provider_is_carried_verbatim() {
+        // Not validated here: whether anything registered it is a question for the registry,
+        // and answering it at startup would make `--profile production` -- which registers
+        // no sandbox at all, on purpose -- unable to start.
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "[sandbox]\nprovider = \"docker\"\n");
+        let config = Config::load(dir.path(), &Overrides::default()).unwrap();
+        assert_eq!(config.sandbox_provider, "docker");
     }
 
     #[test]

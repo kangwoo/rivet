@@ -25,7 +25,7 @@ use rivet_core::plugin::{Interceptor, PluginRegistry};
 use rivet_core::policy::Policy;
 use rivet_core::sandbox::Sandbox;
 use rivet_core::session::SessionStore;
-use rivet_core::tool::Tool;
+use rivet_core::tool::{Tool, ToolSpec};
 use tokio::sync::RwLock;
 
 use crate::bus::BroadcastBus;
@@ -96,11 +96,25 @@ impl<T: ?Sized> Table<T> {
     }
 }
 
+/// A tool and the spec it was registered with.
+///
+/// The spec is **fixed at registration**, not read again at call time. Phase 4 is where
+/// that starts to matter: the policy chain reads `annotations`, and a plugin that keeps
+/// its own `Arc<dyn Tool>` could otherwise return a different `ToolSpec` after
+/// `validate_spec` approved one — so the schema the validator checked and the annotations
+/// a policy judged would not have to be the same value. `docs/architecture.md` §11-14
+/// deferred this decision to the phase that gave it consequences.
+#[derive(Clone, Debug)]
+pub struct RegisteredTool {
+    pub tool: Arc<dyn Tool>,
+    pub spec: Arc<ToolSpec>,
+}
+
 /// All capability tables.
 #[derive(Default)]
 struct Tables {
     models: Option<Table<dyn Model>>,
-    tools: Option<Table<dyn Tool>>,
+    tools: Option<Table<RegisteredTool>>,
     contexts: Option<Table<dyn ContextProvider>>,
     policies: Option<Table<dyn Policy>>,
     sandboxes: Option<Table<dyn Sandbox>>,
@@ -164,13 +178,32 @@ impl Registry {
             .and_then(|t| t.get(id.as_str()))
     }
 
-    pub async fn tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+    /// A registered tool together with the spec it registered under.
+    pub async fn tool(&self, name: &str) -> Option<RegisteredTool> {
         self.tables
             .read()
             .await
             .tools
             .as_ref()
             .and_then(|t| t.get(name))
+            .map(|entry| (*entry).clone())
+    }
+
+    /// Every registered spec, in name order — the list a model request is built from.
+    pub async fn tool_specs(&self) -> Vec<Arc<ToolSpec>> {
+        self.tables
+            .read()
+            .await
+            .tools
+            .as_ref()
+            .map(|t| {
+                t.names()
+                    .iter()
+                    .filter_map(|n| t.get(n))
+                    .map(|entry| entry.spec.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
@@ -400,8 +433,15 @@ impl PluginRegistry for ScopedRegistry {
         // that only the CLI runs leaves that promise false for every other embedder,
         // and false at exactly the moment a policy is reading the arguments.
         crate::schema::validate_spec(&spec)?;
+        let name = spec.name.clone();
+        // The checked spec is what the table keeps. Calling `tool.spec()` again later
+        // would be asking a second time and trusting a possibly different answer.
+        let registered = Arc::new(RegisteredTool {
+            tool,
+            spec: Arc::new(spec),
+        });
         let mut tables = self.registry.tables.write().await;
-        table!(tables, tools, "tool").insert(spec.name, self.owner.clone(), tool)
+        table!(tables, tools, "tool").insert(name, self.owner.clone(), registered)
     }
 
     async fn register_context_provider(&self, provider: Arc<dyn ContextProvider>) -> Result<()> {
@@ -412,6 +452,17 @@ impl PluginRegistry for ScopedRegistry {
 
     async fn register_policy(&self, policy: Arc<dyn Policy>) -> Result<()> {
         let name = policy.name().to_string();
+        // One name the host keeps for itself. `Evaluated::deciding` says `host.baseline`
+        // when nothing in the chain decided anything, so a plugin able to claim it could
+        // put its own name on that answer -- and `tool.policy.evaluated.policy` and
+        // `ToolBlocked.policy` would be able to lie about who decided.
+        if name == crate::policy_chain::BASELINE_POLICY {
+            return Err(Error::plugin(format!(
+                "`{name}` is the name the host uses for its own seed decision; \
+                 `{}` cannot register a policy under it",
+                self.owner.plugin_id
+            )));
+        }
         let mut tables = self.registry.tables.write().await;
         table!(tables, policies, "policy").insert(name, self.owner.clone(), policy)
     }
@@ -716,6 +767,9 @@ mod tests {
         assert!(reg.interceptors().await.is_empty());
         assert!(reg.context_providers().await.is_empty());
         assert!(reg.policies().await.is_empty());
+        // Phase 4 puts weight on this one: step 7 and `rivet doctor` both rest on an
+        // unregistered provider name coming back as `None` rather than as an error.
+        assert!(reg.sandbox("none").await.is_none());
     }
 
     #[tokio::test]

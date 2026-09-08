@@ -1,0 +1,18 @@
+[plugin]
+id           = "rivet.sandbox-local"
+name         = "Local sandbox"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "Runs processes on this machine: empty environment, output cap, process-group kill. Isolates nothing, and says so."
+capabilities = ["sandbox"]
+
+# The permission this provider exists to exercise. A profile that withholds it leaves this
+# plugin registering nothing, which is the intended state under `production`.
+[[permissions]]
+permission = "process_spawn"
+
+# To resolve a child's `cwd` with `fsguard`, which re-checks the path after canonicalizing
+# it. That is the symlink gate for a process's working directory.
+[[permissions]]
+permission = "fs_read"
+scope      = "workspace"

@@ -39,8 +39,13 @@ pub const MANIFEST_TOML: &str = include_str!("../rivet-plugin.toml");
 ///
 /// A `readonly` profile disarms this plugin by meeting `fs_write` away: `write_file` is
 /// then never registered, so it never reaches the model's tool list. That narrows the
-/// **agent's tool scope**, which is pipeline step 2 — it is not a policy, and Phase 4's
-/// real enforcement is still to come.
+/// **agent's tool scope**, which is pipeline step 2.
+///
+/// It is not the only layer any more, and it was never sufficient on its own: it says
+/// nothing about a *different* plugin registering a tool of the same name, and these tools
+/// do not read `ctx.permissions()` when they run. Since Phase 4 the policy `default.grant`
+/// closes that from the chain — a call whose tool declares `read_only == false` is refused
+/// under a grant with no `fs_write`, whoever registered it.
 #[derive(Clone, Debug)]
 pub struct FilesystemPlugin {
     manifest: PluginManifest,

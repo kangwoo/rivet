@@ -149,6 +149,23 @@ pub struct AppState {
     pub jobs: JobView,
     pub status: StatusView,
     pub focus: Panel,
+    /// An approval waiting for an answer.
+    ///
+    /// **The one field on this struct that no event fills.** Everything else here is a fold
+    /// over the bus; this is written by [`crate::app::Tui`]'s `ApprovalSink` implementation,
+    /// because an approval is a *round trip* and the bus is one-way and lossy. See the
+    /// crate documentation.
+    pub pending: Option<ApprovalView>,
+}
+
+/// The approval prompt on screen, as the policy described it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalView {
+    pub reason: String,
+    /// A rendering of exactly what will happen, from the policy that asked.
+    pub preview: String,
+    /// Whether `a` — "allow this for the rest of the session" — is offered.
+    pub allow_remember: bool,
 }
 
 impl AppState {
@@ -239,8 +256,10 @@ impl AppState {
                         line.progress = Some(reason.clone());
                     });
                 }
-                // Phase 4 publishes these. Shown as a progress note rather than dropped,
-                // so a policy decision is visible the day it starts being published.
+                // Published since Phase 4. Shown as a progress note rather than dropped,
+                // so a policy decision is visible on the line it belongs to. Every call
+                // carries a `tool.policy.evaluated`, so every tool line gets a policy note
+                // -- a tool that reports progress of its own overwrites it.
                 ToolEvent::PolicyEvaluated {
                     call_id, policy, ..
                 } => {

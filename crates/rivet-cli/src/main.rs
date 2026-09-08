@@ -53,8 +53,8 @@ struct Cli {
 
     /// Override the configured policy profile.
     ///
-    /// In Phase 1 a profile narrows which tools the agent is offered. It is not policy
-    /// enforcement; that arrives in Phase 4.
+    /// A profile does two things: it narrows which tools the agent is offered, and it
+    /// computes the grant the policy chain enforces on every call.
     #[arg(long, global = true, value_name = "PROFILE")]
     profile: Option<String>,
 

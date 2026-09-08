@@ -1,0 +1,22 @@
+[plugin]
+id           = "rivet.tool-git"
+name         = "Git tools"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "git status, diff, log and commit, run through the sandbox."
+capabilities = ["tool"]
+
+[[permissions]]
+permission = "process_spawn"
+
+# To normalize a `path` argument with `fsguard` before it reaches argv.
+[[permissions]]
+permission = "fs_read"
+scope      = "workspace"
+
+# `git_commit` writes the repository, and only it. The permission vocabulary cannot say
+# "read-only commands", so the *tools* carry that distinction: the three reading ones are
+# registered on `process_spawn` alone, which is what `reviewer` and `readonly` get.
+[[permissions]]
+permission = "fs_write"
+scope      = "workspace"

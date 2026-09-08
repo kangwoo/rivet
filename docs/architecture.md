@@ -683,10 +683,18 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
 5. **다중 Run 동시성** — 한 워크스페이스에서 두 Job이 동시에 실행되면 파일이 충돌한다.
    git worktree 분리? 순차 강제? Phase 5 전 결정.
 6. **Secret 취급** — `Permission::SecretsRead(keys)`만 정의했고 저장·주입·마스킹 경로는
-   미설계. Phase 4.
-7. **비-UTF-8 프로세스 출력** — `ExecOutput.stdout`이 `String`이라 임의 바이트를 내는
-   프로세스를 표현할 수 없다. 현재는 lossy 변환 전제. `Vec<u8>` + 표시용 lossy 뷰로
-   바꿀지 Phase 4에서 결정.
+   미설계. **Phase 4는 이것을 범위 밖으로 두었다.** `docs/plan.md`의 4.1–4.9에 시크릿
+   항목이 없고, 게다가 Phase 4는 시크릿을 덜 필요하게 만든다 — 샌드박스가 빈 환경에서
+   시작하고 운영자가 `env_passthrough`에 **이름으로** 적은 것만 들어간다. 요청자가 없는
+   저장 경로를 설계하는 것은 기능을 발명하는 일이므로 열린 채로 둔다.
+   근거: [`design/phase-4-policy-sandbox.md`](./design/phase-4-policy-sandbox.md) §7-3.
+7. ~~**비-UTF-8 프로세스 출력**~~ — **닫힘 (Phase 4).** `ExecOutput.stdout`은 `String`으로
+   둔다. `Vec<u8>`로 넓히면 계약의 wire 표현이 바뀌고 모든 소비자가 영향을 받는데, 얻는
+   것은 모델이 어차피 읽을 수 없는 바이트다. lossy 변환을 유지하되 **조용히 하지 않는다**:
+   `sandbox-local`이 치환 문자로 바꾸고, `tool-shell`이 그것을 되읽어
+   `ToolResult::structured`에 `lossy: true`를 싣는다. UI는 출력이 뭉개졌다고 말할 수 있고
+   모델은 읽을 수 있는 것만 본다. 근거:
+   [`design/phase-4-policy-sandbox.md`](./design/phase-4-policy-sandbox.md) §2.2, §3.5.
 8. **Slot별 계약 버전 독립 진화** — `CapabilityKind::version()`이 아직 모든 슬롯에 대해
    `0.1`을 반환한다. 실제로 슬롯이 따로 움직이기 시작하는 Phase 6에서 구현.
 9. **Provider egress와 tool egress가 같은 권한을 쓴다** — Phase 2에서 `manifest ∩ profile`이
@@ -697,12 +705,28 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    가리키게 됐다. **Phase 4의 sandbox가 이걸 물려받기 전에 의도적으로 다시 열어야 한다** —
    provider 호출을 막는 프로파일이 필요하면 별도 permission이 필요하고 그건 `rivet-core`
    변경이다. 근거: [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) §7-1.
+
+   **Phase 4에서 의도적으로 다시 열었고, 물려받기로 했다 — 열린 채다.** 다시 연 결과는
+   `sandbox-local`이 `network_isolation: false`를 신고한다는 것이다. 즉 Phase 4에도
+   tool egress를 강제할 수단이 **없다**: `security.md` §8 표의 `network` 열은 여전히
+   아무것도 강제하지 않고, `production`의 "허용 목록"도 마찬가지다. 모든 프로파일이
+   `NetworkHttp(None)`을 계속 준다. 강제할 수 있는 provider(`docker`)가 생기기 전에
+   어휘를 넓히는 것은 §11-11에서 interceptor에 대해 내린 판단("요청자가 없는 어휘 확장은
+   하지 않는다")과 같은 이유로 하지 않는다. 근거:
+   [`design/phase-4-policy-sandbox.md`](./design/phase-4-policy-sandbox.md) §7-15.
 10. **어느 프로파일도 주지 않는 permission이 셋이다** — `ProcessSpawn` · `SecretsRead` ·
    `JobManage`. 넷이었고, `EventsSubscribe`는 **Phase 3 착수 전에 닫았다** (아래).
-   - `ProcessSpawn` — `security.md` §8 표는 `developer`·`ci`에 `process ✓`를 약속하지만
-     주는 쪽이 없다. Phase 4(샌드박스)가 요청자다.
+   - ~~`ProcessSpawn`~~ — **닫힘 (Phase 4).** 요청자가 셋 생겼다(`sandbox-local` ·
+     `tool-shell` · `tool-git`). `production`을 뺀 **네 프로파일**이 준다. `readonly`와
+     `reviewer`도 받는 것이 결정의 요점이다: 어휘가 "읽기 명령만"을 표현하지 못하므로
+     그 구분을 **도구가** 진다 — `tool-git`은 읽기 셋을 `process_spawn`만으로 등록하고
+     `git_commit`은 `fs_write`와 함께여야 등록하며, `tool-shell`은 둘 다 요구한다.
+     그래서 두 프로파일이 실제로 받는 프로세스는 git 읽기 셋뿐이다. `production`은
+     받지 않으므로 `sandbox-local`이 거기서 0개를 등록한다 — 의도된 상태다.
+     테스트: `every_profile_says_whether_it_may_spawn_a_process` ·
+     `the_profile_table_in_security_md_matches_the_code`.
    - `SecretsRead` — 파서가 비어 있지 않은 키 목록을 요구해 완성된 기능처럼 읽힌다.
-     저장·주입 경로는 §11-6대로 Phase 4 미설계다.
+     저장·주입 경로는 §11-6대로 미설계이고, Phase 4가 범위 밖으로 두었다.
    - `JobManage` — Phase 5까지 요청자가 없다.
 
    어느 프로파일이 무엇을 주는지는 정리가 아니라 보안 결정이므로, 남은 셋도 요청자가
@@ -771,7 +795,14 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
 11. **`Interceptor`에 대응하는 `CapabilityKind`가 없다** — manifest guard가
    `register_interceptor`를 선언된 슬롯에 매핑할 수 없어 잠정적으로 `capabilities = ["policy"]`를
    요구한다. 변형을 추가하는 것은 닫힌 어휘를 넓히는 `rivet-core` 변경이라 Phase 2 범위 밖으로
-   뒀다. interceptor가 실제로 실행되는 Phase 4에서 결정. 근거: 같은 문서 §7-2.
+   뒀다. 근거: 같은 문서 §7-2.
+
+   **Phase 4가 판단했고, 기각 이유가 바뀌었다.** Phase 4는 interceptor의 **실행 경로**를
+   만들었다(동시 실행 · 개별 2 s 타임아웃 · fold 합류). 그런데 이 빌드가 싣는 plugin 중
+   interceptor를 등록하는 것은 **하나도 없다** — 만든 것은 실행 경로이지 요청자가 아니다.
+   그래서 기각 이유는 "Phase 2의 범위 밖"에서 **"요청자가 없다"**로 바뀐다. 요청자가 없는
+   어휘 확장은 하지 않는다. 근거:
+   [`design/phase-4-policy-sandbox.md`](./design/phase-4-policy-sandbox.md) §2.2.
 12. **CLI에 남은 마지막 하드코딩 plugin id** — `Config::api_key_env()`가 자격 증명을 미리
    확인하려고 `[plugins."rivet.model-openai"]`를 직접 들여다본다. host가 특정 plugin의 설정
    키를 아는 것으로, Phase 2가 없앤 바로 그 종류의 결합이다. 더 나은 에러를 만들어 내므로
@@ -781,9 +812,14 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    워크스페이스에 가두는 것은 grant가 아니라 `Workspace::resolve`와 fsguard다. 그래서
    `fs_read({ subtree = "docs" })`를 선언한 매니페스트도 워크스페이스 전체를 읽는
    `read_file`을 받고 `rivet plugin show`는 그것을 `granted`로 출력한다. 즉 읽기 scope는
-   Phase 2에서 **선언**이며, 도구별 경로 범위를 실제로 강제하는 것은 Phase 4의 sandbox다.
-   파서가 탈출 서브트리를 지금 거부하는 것은 그 강제가 붙을 때 어휘가 이미 정확하도록
-   하기 위한 것이다. 근거: PR #1 리뷰 2라운드 question 1.
+   Phase 2에서 **선언**이며, 파서가 탈출 서브트리를 지금 거부하는 것은 강제가 붙을 때
+   어휘가 이미 정확하도록 하기 위한 것이다. 근거: PR #1 리뷰 2라운드 question 1.
+
+   **Phase 4는 이것을 닫지 못했다.** `sandbox-local`은 `filesystem_isolation: false`를
+   신고하므로 도구별 경로 범위를 강제하지 않는다. Phase 4가 더한 것은 **호출 시점의 grant
+   판정**(`default.grant`)인데, 그것이 보는 것은 `FsWrite`의 유무이지 scope가 아니다 —
+   좁은 scope의 쓰기도 "쓰기"로 센다(§17). 경로를 실제로 가두는 것은 여전히
+   `Workspace::resolve`와 `fsguard`이고, scope를 강제하려면 격리하는 provider가 필요하다.
 14. **등록 창구는 capability의 *존재*를 닫지 *내용*을 닫지 않는다** — Phase 2의 봉인은
    `load`가 반환된 뒤의 `register_*`를 거부한다. 그런데 plugin이 자기 `Arc<dyn Tool>`을
    계속 들고 있으면 **이미 등록된** tool의 description과 JSON schema를 나중에 바꿀 수
@@ -792,12 +828,28 @@ MVP 착수 전에 답이 필요한 것과, 의도적으로 미룬 것.
    거부했을 spec으로 바꾸는 것까지 통과한다. 드러나는 곳도 없다 — `record.registered`,
    `rivet plugin list`, `rivet doctor`는 전부 이름만 보고 레지스트리 키는 삽입 시점에
    고정됐다. 즉 창구를 우회하는 경로가 capability를 *추가*하는 쪽에는 없고 *내용*을
-   바꾸는 쪽에는 있다. 등록 회계가 목표인 Phase 2의 범위 밖으로 뒀지만, 창구가 다음에
-   닫아야 할 것이 이것인지 — 등록 시점 검증 대신 spec을 등록 시점에 **고정**하는
-   쪽인지 — 는 tool spec이 실제로 모델에 나가는 경로를 다시 여는 Phase 4에서 정한다.
+   바꾸는 쪽에는 있다. 등록 회계가 목표인 Phase 2의 범위 밖으로 뒀다.
    근거: [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) §8-4,
    PR #1 리뷰 3라운드 question 1.
+
+   **닫힘 (Phase 4): spec을 등록 시점에 고정한다.** `register_tool`이 검증한 `ToolSpec`을
+   테이블에 함께 넣고, `Registry::tool`이 `RegisteredTool { tool, spec }`을 돌려준다.
+   호출 시점에 `spec()`을 다시 부르는 곳은 없다. Phase 4가 이 결정을 강제한 이유는
+   **정책이 `annotations`를 읽기 시작했기** 때문이다 — `validate_spec`이 검사한 spec과
+   정책이 판단한 spec이 다를 수 있으면, `default.grant`가 보는 `read_only`는 등록된 것과
+   다른 값일 수 있다.
 15. **`load` 안에서 기다리는 것 말고 방법이 없어졌는데 `load`에는 데드라인이 없다** —
+   **Phase 4도 고치지 않았고, 판단을 적어 둔다.** Phase 4는 interceptor에 2 s 타임아웃을
+   도입했지만 같은 모양을 여기 재사용하지 않았다. interceptor에 대해 열려 있던 것은
+   **숫자뿐**이고 초과했을 때 무엇을 남기는지는 계약이 이미 적어 뒀다("멈춘 interceptor는
+   `None`으로 처리되고 보고된다"). `Plugin::load`에 대해 열려 있는 것은 **초과했을 때 남길
+   상태**이고(`FAILED` 레코드인가 호스트 중단인가), 지정되지 않은 예산은 그 자체로 새 실패
+   모드다 — 부하 걸린 CI의 느린 `load`가 `FAILED`가 된다. 기준: 초과의 대가가 계약에 이미
+   쓰여 있으면 숫자를 발명해도 되고, 쓰여 있지 않으면 안 된다. Phase 4는 plugin을 넷 늘려
+   표면을 넓혔지만, 넷 다 `load`에서 네트워크도 파일도 기다리지 않으므로 §11-15가 그리는
+   형태("닿지 않는 백엔드를 `load` 안에서 기다리는")는 여전히 이 저장소에 없다. 근거:
+   [`design/phase-4-policy-sandbox.md`](./design/phase-4-policy-sandbox.md) §5.
+
    창구가 닫히면서 "연결이 선 다음에 등록한다"는 형태가 사라졌다. 남은 방법은 그 연결을
    `Plugin::load` 안에서 기다리는 것 하나뿐이고(`plugin.md` §4.1), 로더는 `load`에
    타임아웃을 걸지 않는다. 그래서 백엔드에 닿지 못하는 plugin이 "조용히 등록을 안 하는

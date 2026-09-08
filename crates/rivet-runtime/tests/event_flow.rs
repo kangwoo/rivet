@@ -83,16 +83,20 @@ fn every_bus_topic_is_claimed() {
                 | AgentEvent::TurnCompleted { .. }
                 | AgentEvent::RunCompleted { .. } => Owner::Published,
             },
+            // Every one of them since Phase 4, which is why this arm no longer splits.
+            // `tool.policy.evaluated` goes out on *every* call, allowed ones included --
+            // "why did this simply run" is a question an observer has to be able to answer.
+            // The approval pair goes out on every path through step 6, including the ones
+            // nobody was asked on.
             Event::Tool(tool) => match tool {
                 ToolEvent::Requested { .. }
+                | ToolEvent::PolicyEvaluated { .. }
+                | ToolEvent::ApprovalRequested { .. }
+                | ToolEvent::ApprovalResolved { .. }
                 | ToolEvent::Started { .. }
                 | ToolEvent::Progress { .. }
                 | ToolEvent::Completed { .. }
                 | ToolEvent::Blocked { .. } => Owner::Published,
-                // The three lines `dispatch.rs` marks "4 Intercept, 5 Policy, 6 Approval".
-                ToolEvent::PolicyEvaluated { .. }
-                | ToolEvent::ApprovalRequested { .. }
-                | ToolEvent::ApprovalResolved { .. } => Owner::Deferred(4),
             },
             // The whole family: there is no job runtime to publish from yet. The TUI's job
             // panel is built and tested against hand-made envelopes for exactly this reason.
@@ -136,6 +140,9 @@ fn every_bus_topic_is_claimed() {
             "agent.turn.completed",
             "agent.run.completed",
             "tool.requested",
+            "tool.policy.evaluated",
+            "tool.approval.requested",
+            "tool.approval.resolved",
             "tool.execute.started",
             "tool.execute.progress",
             "tool.execute.completed",
@@ -153,24 +160,31 @@ fn every_bus_topic_is_claimed() {
     assert_eq!(
         deferred,
         [
-            "tool.policy.evaluated",
-            "tool.approval.requested",
-            "tool.approval.resolved",
             "job.created",
             "job.state.changed",
             "job.run.attached",
             "job.review.requested",
             "job.review.completed",
         ],
-        "eight topics wait on Phase 4 (3) and Phase 5 (5)"
+        "five topics wait on Phase 5"
     );
 }
 
 #[tokio::test]
 async fn a_run_publishes_every_agent_and_tool_topic_this_phase_owns() {
-    // One script covering all thirteen: streamed text, a tool that reports progress, a
-    // call outside the agent's scope (`tool.blocked`), and one transient failure the loop
-    // retries (`agent.request.failed`).
+    // One script covering fourteen: streamed text, a tool that reports progress, a call
+    // outside the agent's scope (`tool.blocked`), and one transient failure the loop retries
+    // (`agent.request.failed`). `tool.policy.evaluated` joins the list for free -- it is
+    // published on *every* evaluated call, so a script with a tool call in it already
+    // produces one, with no policy registered and nothing else to arrange.
+    //
+    // The approval pair is deliberately **not** here. Producing it means registering a
+    // policy that asks for approval and supplying a sink to answer, which would turn a test
+    // about "the loop publishes what it owns" into a test about the approval path as well.
+    // Those two topics have their own tests -- `the_bus_carries_both_approval_topics` in
+    // `approval.rs` for the bus, and the pair of session events in
+    // `an_approval_leaves_a_requested_and_a_resolved_in_the_log` for the log. A reader who
+    // arrives here looking for them should find this paragraph rather than a gap.
     let harness = Harness::new().await;
     let (recorder, observer) = harness.recorder();
 
@@ -218,6 +232,7 @@ async fn a_run_publishes_every_agent_and_tool_topic_this_phase_owns() {
         "agent.turn.completed",
         "agent.run.completed",
         "tool.requested",
+        "tool.policy.evaluated",
         "tool.execute.started",
         "tool.execute.progress",
         "tool.execute.completed",

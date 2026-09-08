@@ -20,6 +20,14 @@
 //! add an event, not an import. Reaching for the runtime to fill one field is how a UI
 //! stops being a client of the stream, and the first field is always the cheap one.
 //!
+//! **Phase 4 adds the one exception, and it is worth naming.** `AppState::pending` is
+//! filled by [`app::Tui`]'s [`rivet_core::policy::ApprovalSink`] implementation rather than
+//! by a fold over the bus. An approval is not an observation, it is a **round trip**: the
+//! bus is one-way and lossy, so a screen that learned about an approval from
+//! `tool.approval.requested` would still have nowhere to put the answer. `ApprovalSink` is
+//! that somewhere, and it is a `rivet-core` contract — so the rule that actually protects
+//! this crate's independence, "no import outside `rivet-core`", is untouched.
+//!
 //! The corollary is that the job panel is built now, in a phase with no job runtime. Its
 //! producer arrives in Phase 5; leaving the panel out until then would leave Phase 5
 //! holding an empty panel and a tempting `rivet-job` dependency.
@@ -38,5 +46,7 @@ pub const SUBSCRIBER_NAME: &str = "render.tui";
 
 pub use app::{Intent, Tui};
 pub use draw::{NO_JOBS, draw, status_line};
-pub use state::{AppState, JobLine, JobView, Panel, RunView, StatusView, ToolLine, ToolStatus};
+pub use state::{
+    AppState, ApprovalView, JobLine, JobView, Panel, RunView, StatusView, ToolLine, ToolStatus,
+};
 pub use terminal::{TerminalGuard, is_a_terminal};

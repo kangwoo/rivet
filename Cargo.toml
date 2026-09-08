@@ -68,6 +68,10 @@ ratatui = "0.29"
 crossterm = "0.29"
 sha2 = "0.10"
 libc = "0.2"
+# A safe wrapper for `killpg`. The workspace forbids `unsafe`, and killing a process
+# *group* is what stops a `sh -c "cargo test"` from leaving `rustc` behind. Already in
+# `Cargo.lock` as a transitive dependency, so the tree does not grow.
+rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 pretty_assertions = "1"
 

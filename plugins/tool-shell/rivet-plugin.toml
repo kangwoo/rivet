@@ -1,0 +1,22 @@
+[plugin]
+id           = "rivet.tool-shell"
+name         = "Shell tool"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "Runs a shell command through the sandbox the policy chain chose."
+capabilities = ["tool"]
+
+[[permissions]]
+permission = "process_spawn"
+
+[[permissions]]
+permission = "fs_read"
+scope      = "workspace"
+
+# Asked for, and honestly. A tool that runs an arbitrary command writes files; a manifest
+# that claimed otherwise would let a `readonly` profile hand out a shell in the belief that
+# it had taken write access away. `shell` is registered only when *both* this and
+# `process_spawn` survive the profile, which is what keeps it to `developer` and `ci`.
+[[permissions]]
+permission = "fs_write"
+scope      = "workspace"

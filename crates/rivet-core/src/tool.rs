@@ -171,6 +171,12 @@ pub struct ToolContextData {
     /// path *inside* its own filesystem view, which may differ from the host's.
     pub workspace: Workspace,
     /// The *effective* grant, already narrowed by profile and policy.
+    ///
+    /// True since Phase 4: the profile's grant is narrowed again by
+    /// [`crate::policy::ExecutionConstraints::permissions`], folded across the whole
+    /// chain, and the result is what lands here and in the sandbox's
+    /// [`crate::sandbox::SandboxRequest::permissions`]. A tool and its confinement
+    /// therefore read the same grant.
     pub permissions: PermissionSet,
     /// Wall-clock budget for this call, from [`crate::policy::ExecutionConstraints`].
     pub timeout_ms: Option<u64>,

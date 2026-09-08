@@ -57,8 +57,11 @@ async fn main() -> Result<()> {
         .await?;
     println!("registered tools: {:?}", registry.tool_names().await);
 
-    let tool = registry.tool("echo").await.expect("just registered");
-    println!("spec: {}", tool.spec().description);
+    // The spec comes back with the tool, fixed at registration -- not asked for a second
+    // time, which is what keeps the schema the validator checked and the annotations a
+    // policy reads the same value.
+    let registered = registry.tool("echo").await.expect("just registered");
+    println!("spec: {}", registered.spec.description);
 
     bus.publish(EventEnvelope::new(Event::Tool(ToolEvent::Requested {
         call_id: ToolCallId::new(),
