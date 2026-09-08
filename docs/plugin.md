@@ -475,13 +475,29 @@ git --no-pager diff --output=../ESCAPED     # exit 0, 워킹 디렉터리 위에
 | 문 | 누가 골랐나 | 왜 안전한가 |
 |---|---|---|
 | `flag(&'static str)` | 도구 | 모델 JSON에서 읽은 문자열은 `'static`이 아니다 |
-| `option(&'static str, value)` | 모델 | 앞의 옵션이 그대로 삼킨다 (`-m <message>`, `-c <command>`) |
+| `option(Consuming, value)` | 모델 | 앞의 옵션이 그대로 삼킨다 (`-m <message>`, `-c <command>`) |
 | `operand(what, value)` | 모델 | 옵션으로 읽힐 수 있으면 **거부한다** |
 | `pathspec(path)` | 모델 | `--` 뒤에 놓인다. 그 `--`는 빌더가 넣지 호출자가 넣지 않는다 |
 
 인자를 새로 더한다는 것은 문을 하나 고른다는 뜻이고, 넷 다 닫혀 있다. 규칙을 **호출
 지점마다** 적용하면 다음 인자가 엉뚱한 자리에 추가되면서 그 규칙을 건너뛴다 —
 `tool-git`의 `path`는 `--` 뒤에 있었고 `rev`는 두 줄 위에서 맨몸으로 push됐다.
+
+`option`의 플래그가 `&'static str`이 아니라 [`rivet_runtime::argv::Consuming`]인 이유가 같다. 그 문의 안전성은
+**플래그**에 대한 사실이지 값에 대한 사실이 아니다 — 뒤 항목을 실제로 삼키는 옵션일 때만
+성립한다. `argv.option("--staged", 모델값)`은 컴파일되고, 값을 자립하게 만든다. `Consuming`은
+필드가 비공개이고 값은 `argv.rs`에 선언된 `const` 셋뿐이므로, 네 번째 옵션을 더하는 일은
+plugin의 호출 지점이 아니라 **그 가드가 주제인 파일**을 고치는 일이 된다. 같은 목록을
+`option_exposure`가 "이 값이 앞 옵션에 묶였는가"의 판정에 쓰므로, 스키마를 훑는 일반 순회가
+이 오용을 이제 **볼 수 있다**. 값을 붙여 쓰는 형태(`--flag=value`)는 택하지 않았다:
+`--max-count`와 `-m`에는 되지만 `sh -c<command>`는 `/bin/sh` 구현마다 보장되지 않고, 이
+모듈은 어떤 프로그램에 대해서도 성립해야 한다.
+
+`pathspec`은 **빈 문자열을 버린다.** `path: "."`는 워크스페이스 루트로 정규화되어 상대
+경로가 빈 문자열이 되고, `git … -- ""`는 exit 128로 "empty string is not a valid pathspec.
+please use . instead"라고 답한다 — 그 안내가 가리키는 `.`이 방금 그 실패를 만든 입력이므로
+모델이 안내를 따르면 루프에 빠진다. 빈 pathspec은 "전부"라는 뜻이고 아무것도 내보내지
+않는 것과 같으므로, 두 호출 지점이 아니라 문 하나에서 버린다.
 
 `operand`의 거부는 `PolicyDenied`다. 탈출하는 경로와 같은 종류이고 같은 이유다:
 디스패처가 `tool.blocked`으로 기록하므로 워크스페이스 밖으로 나가려던 시도가 스크롤되어

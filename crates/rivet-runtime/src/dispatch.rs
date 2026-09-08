@@ -75,15 +75,24 @@ pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 65_536;
 /// tool that ignores cancellation turns "five seconds" from a promise into a hope.
 pub const DEFAULT_CANCEL_GRACE: Duration = Duration::from_millis(2_000);
 
-/// The policy name recorded when a **tool itself** refuses a path.
+/// The policy name recorded when a **tool itself** refuses.
 ///
-/// This is the refusal `Workspace::resolve` and [`crate::fsguard`] raise from inside step
-/// 8, after the chain has already allowed the call. It stays distinct from a chain
-/// decision, which records the name of whatever actually decided
-/// ([`crate::policy_chain::Evaluated::deciding`]): "containment refused this path while the
-/// tool was running" and "a policy refused this call before it ran" are different facts,
+/// This is the refusal `Workspace::resolve`, [`crate::fsguard`] and [`crate::argv`] raise
+/// from inside step 8, after the chain has already allowed the call. It stays distinct from
+/// a chain decision, which records the name of whatever actually decided
+/// ([`crate::policy_chain::Evaluated::deciding`]): "the tool's own containment refused this
+/// while it was running" and "a policy refused this call before it ran" are different facts,
 /// and an audit that could not tell them apart would be looking in the wrong place.
-pub const WORKSPACE_POLICY: &str = "workspace";
+///
+/// `"tool"` and not `"workspace"`. The dispatcher cannot tell an escaping path from an argv
+/// refusal at this point — both arrive as one `ErrorKind::PolicyDenied` out of `execute` —
+/// and `default.workspace` is a real policy in the chain that never saw this call. Naming
+/// the label after it filed the fact under a policy that did not produce it, which is a
+/// weaker version of the argument for raising `PolicyDenied` here at all.
+pub const TOOL_POLICY: &str = "tool";
+
+/// The policy name recorded when a call is outside the agent's tool scope (step 2).
+pub const SCOPE_POLICY: &str = "agent.scope";
 
 /// What became of one call.
 #[derive(Clone, Debug)]
@@ -330,7 +339,7 @@ impl ToolDispatcher {
         // 2 Scope. A reviewer that can reach `write_file` is not a reviewer.
         if !ctx.agent.allows_tool(&call.name) {
             return Err(Disposition::Blocked {
-                policy: "agent.scope".to_string(),
+                policy: SCOPE_POLICY.to_string(),
                 reason: format!(
                     "tool `{}` is not in agent `{}`'s scope",
                     call.name, ctx.agent.name
@@ -560,7 +569,7 @@ impl ToolDispatcher {
             Execution::Returned(Err(error)) => match error.kind() {
                 // A refusal is a durable audit fact, not a tool failure.
                 ErrorKind::PolicyDenied | ErrorKind::ApprovalDenied => Disposition::Blocked {
-                    policy: WORKSPACE_POLICY.to_string(),
+                    policy: TOOL_POLICY.to_string(),
                     reason: error.message().to_string(),
                 },
                 ErrorKind::Cancelled => interrupted(),

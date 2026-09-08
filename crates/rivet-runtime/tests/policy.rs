@@ -21,8 +21,8 @@ use rivet_runtime::jitter::NoJitter;
 use rivet_runtime::policy_chain::{self, BASELINE_POLICY, Baseline, REWRITE_DEPTH_LIMIT};
 use rivet_runtime::registry::Registry;
 use support::{
-    BrokenPolicy, EchoTool, FixedPolicy, FixtureModel, Harness, Reply, SlowInterceptor, sse_text,
-    sse_tool_calls,
+    BrokenPolicy, EchoTool, FixedPolicy, FixtureModel, Harness, ReadTool, Reply, SlowInterceptor,
+    sse_text, sse_tool_calls,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -181,19 +181,27 @@ async fn nobody_deciding_is_recorded_as_the_baseline_deciding() {
 }
 
 #[tokio::test]
-async fn no_registered_policy_may_claim_the_baseline_name() {
-    // While that name means "nobody decided", a policy able to register under it could put
-    // itself on a decision it never made -- in `tool.policy.evaluated` and in `tool.blocked`
-    // alike.
-    let harness = Harness::new().await;
-    let error = harness
-        .try_register_policy(Arc::new(FixedPolicy::new(
-            BASELINE_POLICY,
-            PolicyDecision::allow(),
-        )))
-        .await
-        .expect_err("the host keeps this name for its own seed");
-    assert!(error.message().contains(BASELINE_POLICY), "{error}");
+async fn no_registered_policy_may_claim_a_name_the_host_writes() {
+    // All three, not just the baseline. Each is a value the *host* puts in
+    // `tool.policy.evaluated.policy` or `ToolBlocked.policy`: `host.baseline` means nobody
+    // in the chain decided, `agent.scope` is step 2's refusal, and `tool` is one the tool
+    // raised from inside step 8. A policy able to register under any of them could put
+    // itself on a decision it never made.
+    for reserved in [
+        BASELINE_POLICY,
+        rivet_runtime::dispatch::TOOL_POLICY,
+        rivet_runtime::dispatch::SCOPE_POLICY,
+    ] {
+        let harness = Harness::new().await;
+        let error = harness
+            .try_register_policy(Arc::new(FixedPolicy::new(
+                reserved,
+                PolicyDecision::allow(),
+            )))
+            .await
+            .unwrap_err();
+        assert!(error.message().contains(reserved), "{error}");
+    }
 }
 
 #[tokio::test]
@@ -532,6 +540,51 @@ async fn every_call_publishes_a_policy_decision() {
         panic!("wrong payload");
     };
     assert_eq!(policy, BASELINE_POLICY);
+}
+
+#[tokio::test]
+async fn a_refusal_the_tool_raised_is_filed_under_the_tool_and_not_a_policy() {
+    // `.env` is on the workspace deny list, so `fsguard` refuses it from *inside* the tool,
+    // in step 8, after the chain has already allowed the call. The label used to say
+    // `workspace` -- the name of a real policy in the chain that never evaluated this call.
+    // A refusal is a durable audit fact, and one filed under a rule that did not produce it
+    // is a weaker fact than one filed under the tool's own containment.
+    let harness = Harness::new().await;
+    harness.register_tool(Arc::new(ReadTool)).await;
+    harness
+        .register_model(Arc::new(FixtureModel::new(vec![
+            Reply::Sse(sse_tool_calls(&[(
+                "read_file",
+                serde_json::json!({ "path": ".env" }),
+            )])),
+            Reply::Sse(sse_text("I cannot read that one.")),
+        ])))
+        .await;
+
+    agent_loop(&harness)
+        .run(config(&harness), harness.state().await, None)
+        .await
+        .expect("the run finishes");
+
+    let events = harness.events().await;
+    let policy = events
+        .iter()
+        .find_map(|stored| match &stored.event {
+            rivet_core::session::SessionEvent::ToolBlocked { policy, .. } => Some(policy.clone()),
+            _ => None,
+        })
+        .expect("a containment refusal is a durable audit fact");
+    // The literal, not the constant: comparing against `TOOL_POLICY` would agree with
+    // whatever the constant happens to say, including `workspace` again.
+    assert_eq!(
+        policy, "tool",
+        "the tool's own containment refused; no policy in the chain did"
+    );
+    assert_eq!(
+        policy,
+        rivet_runtime::dispatch::TOOL_POLICY,
+        "and the constant is what the dispatcher writes"
+    );
 }
 
 #[tokio::test]

@@ -8,9 +8,16 @@
 //! `git --no-pager diff --output=../x` exits 0 and writes a file above the working
 //! directory. A test that named `rev` would have caught `rev` and not the next one.
 //!
-//! So the test walks `spec().input_schema` and feeds **every declared string property** an
-//! option-shaped value. An argument added later is covered on the day it is declared,
-//! because declaring it is what a tool has to do to receive it at all.
+//! So the test walks `spec().input_schema` and feeds an option-shaped value to **every
+//! declared property that could carry a string**. An argument added later is covered on the
+//! day it is declared, because declaring it is what a tool has to do to receive it at all.
+//!
+//! The filter is written as an exclusion — everything except `boolean`, `integer` and
+//! `number` — rather than as `type == "string"`. A property declared later as an *array* of
+//! strings puts model-supplied strings in argv exactly as a plain one does, and a filter
+//! written the other way round would have skipped it in silence. The name set asserted at
+//! the end is the **full** one, every type included, so an argument of any shape makes
+//! somebody look at this file once.
 
 mod support;
 
@@ -23,17 +30,39 @@ use support::Fixture;
 /// curiosity: `git` writes the diff wherever it points, from a tool annotated `read_only`.
 const INJECTED: &str = "--output=escaped-by-the-model";
 
-/// Every string property a tool declares, in schema order.
-fn string_properties(tool: &dyn Tool) -> Vec<String> {
+/// Every property a tool declares, in schema order, paired with its declared type.
+fn properties(tool: &dyn Tool) -> Vec<(String, String)> {
     let spec = tool.spec();
     let Some(properties) = spec.input_schema["properties"].as_object() else {
         return Vec::new();
     };
     properties
         .iter()
-        .filter(|(_, schema)| schema["type"] == "string")
-        .map(|(key, _)| key.clone())
+        .map(|(key, schema)| {
+            (
+                key.clone(),
+                schema["type"].as_str().unwrap_or("").to_string(),
+            )
+        })
         .collect()
+}
+
+/// Whether a property of this declared type could put a model-supplied string in argv.
+///
+/// Excluding the three that cannot rather than naming the one that can. An `array` of
+/// strings reaches argv the same way a `string` does, and so would an `object`; a filter
+/// that listed the safe case would let both through without saying anything.
+fn could_carry_a_string(declared_type: &str) -> bool {
+    !matches!(declared_type, "boolean" | "integer" | "number")
+}
+
+/// The option-shaped value to send, shaped for the declared type.
+fn injected(declared_type: &str) -> serde_json::Value {
+    if declared_type == "array" {
+        serde_json::json!([INJECTED])
+    } else {
+        serde_json::json!(INJECTED)
+    }
 }
 
 /// The input a tool needs before the key under test is added.
@@ -62,14 +91,17 @@ async fn no_declared_argument_can_become_an_option() {
         Box::new(GitCommit),
     ];
 
-    let mut exercised: Vec<String> = Vec::new();
+    let mut declared: Vec<String> = Vec::new();
     for tool in &tools {
         let name = tool.spec().name;
-        for key in string_properties(tool.as_ref()) {
-            exercised.push(format!("{name}.{key}"));
+        for (key, declared_type) in properties(tool.as_ref()) {
+            declared.push(format!("{name}.{key}"));
+            if !could_carry_a_string(&declared_type) {
+                continue;
+            }
             let fixture = Fixture::new();
             let mut input = required_scaffold(tool.as_ref(), &key);
-            input.insert(key.clone(), serde_json::json!(INJECTED));
+            input.insert(key.clone(), injected(&declared_type));
 
             let outcome = tool
                 .execute(fixture.ctx(), serde_json::Value::Object(input))
@@ -96,20 +128,23 @@ async fn no_declared_argument_can_become_an_option() {
             }
         }
     }
-    // What the walk found, named. The *coverage* above is automatic -- a property added
+    // Every declared property, of every type. The *coverage* above is automatic -- one added
     // later is exercised the day it is declared -- and this line only proves the walk
     // walked. A new argument fails here too, which is the point: adding one should make
-    // somebody look at this file once.
-    exercised.sort();
+    // somebody look at this file once, including the ones this walk deliberately skips.
+    declared.sort();
     assert_eq!(
-        exercised,
+        declared,
         [
+            "git_commit.all",
             "git_commit.message",
             "git_diff.path",
             "git_diff.rev",
+            "git_diff.staged",
+            "git_log.limit",
             "git_log.path"
         ],
-        "the schema walk found a different set of string arguments than the tools declare"
+        "the schema walk found a different set of arguments than the tools declare"
     );
 }
 

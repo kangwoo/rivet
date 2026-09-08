@@ -31,6 +31,18 @@ use tokio::sync::RwLock;
 use crate::bus::BroadcastBus;
 use tokio::task::JoinHandle;
 
+/// The policy names a decision can carry that no plugin wrote.
+///
+/// Every value the **host** puts in `ToolBlocked.policy` and
+/// `tool.policy.evaluated.policy`. Kept here as one list so reserving them is one check
+/// rather than one per name, and so adding a fourth host-written label is an edit to a place
+/// that says what the list is for.
+const HOST_POLICY_NAMES: [&str; 3] = [
+    crate::policy_chain::BASELINE_POLICY,
+    crate::dispatch::TOOL_POLICY,
+    crate::dispatch::SCOPE_POLICY,
+];
+
 /// Who registered an entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
@@ -452,13 +464,16 @@ impl PluginRegistry for ScopedRegistry {
 
     async fn register_policy(&self, policy: Arc<dyn Policy>) -> Result<()> {
         let name = policy.name().to_string();
-        // One name the host keeps for itself. `Evaluated::deciding` says `host.baseline`
-        // when nothing in the chain decided anything, so a plugin able to claim it could
-        // put its own name on that answer -- and `tool.policy.evaluated.policy` and
-        // `ToolBlocked.policy` would be able to lie about who decided.
-        if name == crate::policy_chain::BASELINE_POLICY {
+        // The names the host keeps for itself: the three values of `ToolBlocked.policy` and
+        // `tool.policy.evaluated.policy` that the *host* writes rather than a chain member.
+        // `host.baseline` is what `Evaluated::deciding` says when nothing in the chain
+        // decided; `agent.scope` is step 2's refusal; `tool` is a refusal the tool raised
+        // from inside step 8. A plugin able to register under any of them could put its own
+        // name on an answer it did not give, and those two fields would be able to lie about
+        // who decided.
+        if HOST_POLICY_NAMES.contains(&name.as_str()) {
             return Err(Error::plugin(format!(
-                "`{name}` is the name the host uses for its own seed decision; \
+                "`{name}` is a name the host uses for a decision of its own; \
                  `{}` cannot register a policy under it",
                 self.owner.plugin_id
             )));

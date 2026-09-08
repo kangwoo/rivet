@@ -45,7 +45,24 @@ pub struct Tui {
     /// Separate from [`AppState`] on purpose: the state is a value the drawing code clones
     /// and a test builds by hand, and a one-shot sender is neither cloneable nor something a
     /// test should have to construct to draw a modal.
+    ///
+    /// Two locks, so both are taken together and always `state` first — see
+    /// [`Tui::answer_approval`].
     answer: Mutex<Option<oneshot::Sender<ApprovalOutcome>>>,
+    /// Cancelled when the screen goes away, and never uncancelled.
+    ///
+    /// "There is no screen" has to be a state the sink knows, because the sink outlives the
+    /// screen. `q` ends the drawing and lets the run carry on — by design — but the host's
+    /// `cfg.approval_sink` still holds this same `Arc<Tui>`, and after `q` there is no
+    /// render loop, therefore no key source, therefore nothing in the process that could
+    /// complete an approval. A `request` parking there would wait out the run's whole
+    /// `max_duration_ms` with nothing drawn: the hang `--headless` and `render/approve.rs`
+    /// each exist to prevent, arriving through a third door.
+    ///
+    /// So a dismissed screen stops being a sink. [`Tui::request`] returns `Err`, and
+    /// `Approvals::decide` already maps a sink `Err` to `Denied` — the direction that
+    /// closes, and the same answer `--headless` gives.
+    dismissed: CancellationToken,
 }
 
 impl fmt::Debug for Tui {
@@ -64,9 +81,26 @@ impl Tui {
                 state: Mutex::new(AppState::default()),
                 intents,
                 answer: Mutex::new(None),
+                dismissed: CancellationToken::new(),
             },
             rx,
         )
+    }
+
+    /// The screen is gone: stop drawing, and stop being an approval sink.
+    ///
+    /// One-way and idempotent. The host calls it on `q`, and on every other path that takes
+    /// the screen down; the render loop calls it on its own way out, so one that ends
+    /// because the terminal stopped working closes the sink too. That is what makes "no
+    /// screen, no sink" a property of the loop rather than of everyone who starts one.
+    pub fn dismiss(&self) {
+        self.dismissed.cancel();
+    }
+
+    /// Whether the screen has been dismissed.
+    #[must_use]
+    pub fn is_dismissed(&self) -> bool {
+        self.dismissed.is_cancelled()
     }
 
     /// A snapshot of the screen state, for tests and for the host's final summary.
@@ -94,18 +128,22 @@ impl Tui {
         Ok(())
     }
 
-    /// Redraw on a tick, and turn key presses into [`Intent`]s, until `cancel` fires.
+    /// Redraw on a tick, and turn key presses into [`Intent`]s, until the screen is
+    /// dismissed.
+    ///
+    /// The screen's own token rather than one handed in: "the loop is running" and "the
+    /// sink can be answered" are the same fact, and two tokens could disagree about it.
+    /// [`Tui::dismiss`] is how a host ends this.
     ///
     /// # Errors
     /// Anything the terminal backend reports while drawing or polling.
     pub async fn render_loop<B: ratatui::backend::Backend>(
         &self,
         terminal: &mut ratatui::Terminal<B>,
-        cancel: CancellationToken,
     ) -> std::io::Result<()> {
         // `poll` blocks a thread, so it runs on the blocking pool with a short budget: the
         // tick is what bounds how long a cancelled run keeps a terminal in raw mode.
-        self.drive(terminal, cancel, || read_key(TICK)).await
+        self.drive(terminal, || read_key(TICK)).await
     }
 
     /// [`Tui::render_loop`] with the key source handed in.
@@ -118,7 +156,6 @@ impl Tui {
     async fn drive<B, K, Fut>(
         &self,
         terminal: &mut ratatui::Terminal<B>,
-        cancel: CancellationToken,
         mut next_key: K,
     ) -> std::io::Result<()>
     where
@@ -126,13 +163,18 @@ impl Tui {
         K: FnMut() -> Fut,
         Fut: Future<Output = std::io::Result<Option<KeyEvent>>>,
     {
+        // However this loop ends -- dismissed, or a `?` out of a terminal that stopped
+        // working -- the screen is gone when it does, and a screen that is gone is not a
+        // sink. Written once here rather than at each way out, because the way out that was
+        // missed is the one that caused this.
+        let _gone = Dismissal(self);
         loop {
             self.draw_frame(terminal)?;
-            if cancel.is_cancelled() {
+            if self.dismissed.is_cancelled() {
                 return Ok(());
             }
             let key = tokio::select! {
-                () = cancel.cancelled() => {
+                () = self.dismissed.cancelled() => {
                     // One more frame before the screen goes. The host cancels *after* it
                     // has drained the bus, so the events that describe the ending --
                     // `runtime.shutting_down` among them -- folded in while this loop was
@@ -156,31 +198,30 @@ impl Tui {
     /// Returns whether the key was consumed. A failed `send` means the dispatcher stopped
     /// waiting — the run was cancelled, or its deadline passed — and clearing `pending` on
     /// that failure is what keeps an unanswerable modal off the screen.
+    ///
+    /// Both locks are held together, `state` then `answer`, which is the order
+    /// [`Tui::request`] takes them in too. Setting the two in sequence left a window: a key
+    /// arriving between them saw a modal with no sender, took the "nobody is listening"
+    /// branch, and cleared `pending` — leaving `request` parked on a receiver that no later
+    /// key could reach, because there was no longer a modal on screen to answer.
     fn answer_approval(&self, key: KeyEvent) -> bool {
-        let outcome = {
-            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(pending) = state.pending.as_ref() else {
-                return false;
-            };
-            match key.code {
-                KeyCode::Char('y') => ApprovalOutcome::Approved,
-                KeyCode::Char('a') if pending.allow_remember => ApprovalOutcome::ApprovedForSession,
-                KeyCode::Char('n') | KeyCode::Esc => ApprovalOutcome::Denied,
-                _ => return false,
-            }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(pending) = state.pending.as_ref() else {
+            return false;
+        };
+        let outcome = match key.code {
+            KeyCode::Char('y') => ApprovalOutcome::Approved,
+            KeyCode::Char('a') if pending.allow_remember => ApprovalOutcome::ApprovedForSession,
+            KeyCode::Char('n') | KeyCode::Esc => ApprovalOutcome::Denied,
+            _ => return false,
         };
 
-        let sender = self
-            .answer
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        let delivered = sender.is_some_and(|sender| sender.send(outcome).is_ok());
+        let delivered = answer
+            .take()
+            .is_some_and(|sender| sender.send(outcome).is_ok());
         if !delivered {
-            self.state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .pending = None;
+            state.pending = None;
         }
         true
     }
@@ -224,6 +265,15 @@ impl Tui {
     }
 }
 
+/// Dismisses the screen however [`Tui::drive`] ends — the `?` and an unwind included.
+struct Dismissal<'a>(&'a Tui);
+
+impl Drop for Dismissal<'_> {
+    fn drop(&mut self) {
+        self.0.dismiss();
+    }
+}
+
 /// Read one key, waiting at most `timeout`.
 ///
 /// On the blocking pool: `crossterm::event::poll` parks a thread, and parking a runtime
@@ -244,34 +294,61 @@ async fn read_key(timeout: Duration) -> std::io::Result<Option<KeyEvent>> {
 
 #[async_trait]
 impl ApprovalSink for Tui {
-    /// Put the prompt on screen and wait for a key.
+    /// Put the prompt on screen and wait for a key — unless the screen is gone.
     ///
     /// No timeout of its own: the run's deadline already reaches the dispatcher, which drops
     /// the receiver when it gives up. The next key press then fails to send, and that
     /// failure is what clears the modal — so the screen never keeps a prompt nobody is
     /// listening for.
+    ///
+    /// The dismissal is checked *and* raced. Checked, so a question is never put on a screen
+    /// that has already gone; raced, so a prompt that was on screen when `q` arrived is
+    /// released too rather than parked behind a key that can no longer be pressed.
     async fn request(&self, request: ApprovalRequest) -> rivet_core::Result<ApprovalOutcome> {
+        if self.dismissed.is_cancelled() {
+            return Err(no_longer_on_screen());
+        }
         let (sender, receiver) = oneshot::channel();
         {
+            // Both locks, in [`Tui::answer_approval`]'s order, so "a modal on screen has a
+            // sender" holds by construction rather than by the window being small.
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
             state.pending = Some(ApprovalView {
                 reason: request.reason,
                 preview: request.preview,
                 allow_remember: request.allow_remember,
             });
+            *answer = Some(sender);
         }
-        *self.answer.lock().unwrap_or_else(PoisonError::into_inner) = Some(sender);
 
-        let outcome = receiver.await;
+        let outcome = tokio::select! {
+            answered = receiver => answered.map_err(|_| {
+                rivet_core::Error::cancelled(
+                    "the approval prompt was closed before it was answered",
+                )
+            }),
+            () = self.dismissed.cancelled() => Err(no_longer_on_screen()),
+        };
         {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
             state.pending = None;
+            *answer = None;
         }
-        *self.answer.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        outcome.map_err(|_| {
-            rivet_core::Error::cancelled("the approval prompt was closed before it was answered")
-        })
+        outcome
     }
+}
+
+/// The refusal a screen that is gone gives.
+///
+/// `Approvals::decide` maps a sink `Err` to `Denied` with a `tracing::warn!`, so this is the
+/// closed direction: the call is refused and the run keeps moving, rather than the run
+/// stopping on a question nobody can be shown.
+fn no_longer_on_screen() -> rivet_core::Error {
+    rivet_core::Error::cancelled(
+        "the approval prompt is no longer on screen; the run continued without it",
+    )
 }
 
 #[async_trait]
@@ -355,12 +432,11 @@ mod tests {
         // in `AppState` and was never rendered, so `runtime.shutting_down` could not reach a
         // user's eyes however correct the fold and the status bar were.
         let (tui, _intents) = Tui::new();
-        let cancel = CancellationToken::new();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
 
         // Concurrent on purpose: the frame at issue is the one drawn *after* the loop has
-        // parked, so the event and the cancel have to arrive while it is parked.
+        // parked, so the event and the dismissal have to arrive while it is parked.
         let feed = async {
             tokio::time::sleep(Duration::from_millis(20)).await;
             tui.on_event(&EventEnvelope::new(Event::Runtime(
@@ -369,7 +445,7 @@ mod tests {
                 },
             )))
             .await;
-            cancel.cancel();
+            tui.dismiss();
         };
         // A key source that never produces one, so the loop parks exactly where the real
         // `read_key` parks it.
@@ -377,7 +453,7 @@ mod tests {
             tokio::time::sleep(TICK).await;
             Ok(None)
         };
-        let (drawn, ()) = tokio::join!(tui.drive(&mut terminal, cancel.clone(), idle), feed);
+        let (drawn, ()) = tokio::join!(tui.drive(&mut terminal, idle), feed);
         drawn.expect("the test backend does not fail");
 
         let rendered: String = terminal
@@ -516,6 +592,73 @@ mod tests {
             "the run's own cancellation path is what clears it, not this key"
         );
         asking.abort();
+    }
+
+    // --- the screen the user walked away from ---------------------------------------------
+
+    #[tokio::test]
+    async fn a_dismissed_screen_is_not_a_sink() {
+        // `q` stops the drawing and lets the run finish, which is what it promises. After it
+        // there is no render loop, so no key path, so nothing that could ever complete this
+        // oneshot -- and the host's `cfg.approval_sink` still holds this same `Tui`. Parking
+        // here meant a run that printed nothing and looked hung for its whole
+        // `max_duration_ms`: half an hour by default.
+        let (tui, _intents) = Tui::new();
+        tui.dismiss();
+
+        // Under a timeout, because the regression this pins is a *park*: without the
+        // bound, a reintroduced bug would hang the suite instead of failing it.
+        let error = tokio::time::timeout(Duration::from_secs(5), tui.request(ask(true)))
+            .await
+            .expect("the request returns rather than parking")
+            .expect_err("a screen that is gone cannot be asked");
+        assert_eq!(error.kind(), rivet_core::error::ErrorKind::Cancelled);
+        assert!(
+            tui.snapshot().pending.is_none(),
+            "and nothing was put on a screen nobody is drawing"
+        );
+    }
+
+    #[tokio::test]
+    async fn dismissing_releases_an_approval_that_was_already_waiting() {
+        // The same failure, one moment earlier: the prompt was on screen when `q` arrived.
+        // Checking the dismissal only on the way in would leave this one parked.
+        let (tui, _intents) = Tui::new();
+        let tui = std::sync::Arc::new(tui);
+        let asking = {
+            let tui = tui.clone();
+            tokio::spawn(async move { tui.request(ask(true)).await })
+        };
+        wait_for_pending(&tui).await;
+
+        tui.dismiss();
+        let error = tokio::time::timeout(Duration::from_secs(5), asking)
+            .await
+            .expect("the request returns rather than parking")
+            .expect("the task joins")
+            .expect_err("a screen that is gone cannot answer");
+        assert_eq!(error.kind(), rivet_core::error::ErrorKind::Cancelled);
+        assert!(tui.snapshot().pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_render_loop_that_ends_on_its_own_stops_being_a_sink() {
+        // Nobody asked this loop to stop -- the terminal did. If only the host's `q` path
+        // dismissed, "no screen, no sink" would hold on the paths somebody remembered and
+        // not on this one.
+        let (tui, _intents) = Tui::new();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let broken = || async { Err(std::io::Error::other("the terminal went away")) };
+
+        tui.drive(&mut terminal, broken)
+            .await
+            .expect_err("the key source failed");
+        assert!(tui.is_dismissed(), "the loop is gone, so the sink is too");
+        tokio::time::timeout(Duration::from_secs(5), tui.request(ask(true)))
+            .await
+            .expect("the request returns rather than parking")
+            .expect_err("and it refuses rather than being asked");
     }
 
     #[tokio::test]

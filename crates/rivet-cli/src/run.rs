@@ -273,6 +273,18 @@ async fn drive(
     let cancel = CancellationToken::new();
     let signals = crate::signals::install(cancel.clone());
 
+    // The screen, if there is one. `TerminalGuard` owns raw mode for as long as it lives,
+    // so the run happens inside its scope and the summary is printed after `restore`.
+    //
+    // Before the sink rather than after it, because for `--tui` the sink *is* the screen: a
+    // `Tui` with no render loop behind it has no key path, and a question asked of one would
+    // park until the run's deadline. `Screen` is what starts that loop and what tells the
+    // `Tui` when it is over.
+    let mut screen = match (&watching.tui, watching.intents.take()) {
+        (Some(tui), Some(intents)) => Some(Screen::start(tui, intents, &cancel)?),
+        _ => None,
+    };
+
     // Who can answer an approval, and therefore whether this run is attended at all.
     //
     // `Config::unattended` records what the *operator* said — `--headless`, or the `ci`
@@ -281,8 +293,10 @@ async fn drive(
     // terminal. A run piped from `/dev/null` without `--headless` has nobody to ask, and a
     // prompt there would hang on a read that never returns.
     let sink: Option<Arc<dyn rivet_core::policy::ApprovalSink>> = match (output, &watching.tui) {
-        (Output::Tui, Some(tui)) => Some(tui.clone()),
-        (Output::Tui, None) => None,
+        (Output::Tui, Some(tui)) if screen.is_some() => {
+            Some(tui.clone() as Arc<dyn rivet_core::policy::ApprovalSink>)
+        }
+        (Output::Tui, _) => None,
         (Output::Human | Output::Jsonl, _) => crate::render::approve::PromptApprover::for_stdin()
             .map(|approver| Arc::new(approver) as Arc<dyn rivet_core::policy::ApprovalSink>),
     };
@@ -303,13 +317,6 @@ async fn drive(
         Arc::new(ExponentialBackoff::default()),
         Arc::new(FullJitter::for_run(cfg.run_id)),
     );
-
-    // The screen, if there is one. `TerminalGuard` owns raw mode for as long as it lives,
-    // so the run happens inside its scope and the summary is printed after `restore`.
-    let mut screen = match (&watching.tui, watching.intents.take()) {
-        (Some(tui), Some(intents)) => Some(Screen::start(tui, intents, &cancel)?),
-        _ => None,
-    };
 
     let summary = agent_loop.run(cfg, state, input).await;
 
@@ -406,9 +413,16 @@ fn answer(run: &rivet_tui::RunView) {
 struct Screen {
     render: Option<tokio::task::JoinHandle<()>>,
     intents: Option<tokio::task::JoinHandle<()>>,
-    /// Ends the render loop. A child of nothing: cancelling the *run* should not
-    /// immediately blank the screen, because the run still has its shutdown to do.
-    stop: CancellationToken,
+    /// The screen itself, so every way out of here can tell it that it is gone.
+    ///
+    /// [`Tui::dismiss`] ends the render loop **and** closes the approval sink, which is one
+    /// fact rather than two that can disagree. Two tokens is what the bug was: `q` cancelled
+    /// the one the loop watched and left `cfg.approval_sink` holding a screen with no key
+    /// path, so the next call needing an approval parked there for the run's whole deadline.
+    ///
+    /// Independent of the run's own token, still: cancelling the *run* must not blank the
+    /// screen, because the run has its shutdown left to show.
+    tui: Arc<Tui>,
 }
 
 impl Screen {
@@ -424,12 +438,11 @@ impl Screen {
         let mut guard = rivet_tui::TerminalGuard::enter().map_err(|e| {
             Error::internal("could not put the terminal into raw mode").with_cause(e)
         })?;
-        let stop = CancellationToken::new();
 
         let render = tokio::spawn({
-            let (tui, stop) = (tui.clone(), stop.clone());
+            let tui = tui.clone();
             async move {
-                let _ = tui.render_loop(guard.terminal(), stop).await;
+                let _ = tui.render_loop(guard.terminal()).await;
                 // Explicit, not just `Drop`: the summary is printed on the real screen
                 // after this, and the forced-exit path below runs no destructors at all.
                 guard.restore();
@@ -438,26 +451,12 @@ impl Screen {
 
         let intents = tokio::spawn({
             let run_cancel = run_cancel.clone();
-            let stop = stop.clone();
+            let tui = tui.clone();
             async move {
                 let mut asked_to_cancel = false;
                 while let Some(intent) = intents.recv().await {
-                    match Reaction::to(intent, &mut asked_to_cancel) {
-                        Reaction::StopDrawing => {
-                            stop.cancel();
-                            return;
-                        }
-                        Reaction::CancelTheRun => run_cancel.cancel(),
-                        Reaction::ForceExit => {
-                            // `process::exit` runs no destructors, so the terminal is put
-                            // back here rather than left to `TerminalGuard::drop`.
-                            rivet_tui::terminal::restore();
-                            eprintln!(
-                                "forced; the session log may end mid-turn and will be \
-                                 repaired on resume"
-                            );
-                            std::process::exit(crate::exit::CANCELLED);
-                        }
+                    if Reaction::to(intent, &mut asked_to_cancel).carry_out(&tui, &run_cancel) {
+                        return;
                     }
                 }
             }
@@ -466,7 +465,7 @@ impl Screen {
         Ok(Self {
             render: Some(render),
             intents: Some(intents),
-            stop,
+            tui: tui.clone(),
         })
     }
 
@@ -479,7 +478,7 @@ impl Screen {
     /// race the alternate screen going away.
     #[allow(clippy::future_not_send)] // Runs on the same task that built it.
     async fn stop(&mut self) {
-        self.stop.cancel();
+        self.tui.dismiss();
         if let Some(render) = self.render.take() {
             let _ = render.await;
         }
@@ -500,7 +499,7 @@ impl Drop for Screen {
     /// mode and the alternate screen. There is no `await` in a destructor to order it
     /// against anything, which is exactly why `stop` exists as well as this.
     fn drop(&mut self) {
-        self.stop.cancel();
+        self.tui.dismiss();
         if let Some(render) = self.render.take() {
             render.abort();
         }
@@ -535,6 +534,36 @@ impl Reaction {
             Intent::Cancel => {
                 *asked = true;
                 Self::CancelTheRun
+            }
+        }
+    }
+
+    /// Carry it out. `true` means the pump is done.
+    ///
+    /// A function rather than three branches inside a spawned task so the one that is easy
+    /// to get wrong can be tested: `StopDrawing` has to dismiss the **screen**, not just end
+    /// the drawing. Ending the drawing alone left `cfg.approval_sink` holding a `Tui` whose
+    /// key path was gone, and the next call needing an approval waited there for the run's
+    /// whole `max_duration_ms` with nothing on the terminal.
+    fn carry_out(self, tui: &Tui, run_cancel: &CancellationToken) -> bool {
+        match self {
+            Self::StopDrawing => {
+                tui.dismiss();
+                true
+            }
+            Self::CancelTheRun => {
+                run_cancel.cancel();
+                false
+            }
+            Self::ForceExit => {
+                // `process::exit` runs no destructors, so the terminal is put back here
+                // rather than left to `TerminalGuard::drop`.
+                rivet_tui::terminal::restore();
+                eprintln!(
+                    "forced; the session log may end mid-turn and will be \
+                     repaired on resume"
+                );
+                std::process::exit(crate::exit::CANCELLED);
             }
         }
     }
@@ -608,5 +637,25 @@ mod tests {
             Reaction::StopDrawing
         );
         assert!(!asked, "quitting is not a cancel");
+    }
+
+    #[test]
+    fn quitting_also_stops_the_screen_from_answering_approvals() {
+        // The other half of `q`, and the one that was missing. The run carries on -- which
+        // is what the test above pins -- so a later call can still need an approval, and
+        // `cfg.approval_sink` still holds this same `Tui`. With the render loop gone there
+        // is no key path, so asking it would park until `max_duration_ms`: thirty minutes by
+        // default, with nothing drawn.
+        let (tui, _intents) = Tui::new();
+        let run = CancellationToken::new();
+        assert!(
+            Reaction::StopDrawing.carry_out(&tui, &run),
+            "the intent pump is done once the screen is gone"
+        );
+        assert!(tui.is_dismissed(), "so the sink is closed with it");
+        assert!(
+            !run.is_cancelled(),
+            "and the run carries on, which is what `q` promises"
+        );
     }
 }

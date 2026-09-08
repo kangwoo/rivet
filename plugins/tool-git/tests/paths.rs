@@ -13,6 +13,46 @@ use rivet_core::tool::Tool;
 use rivet_tool_git::{GitDiff, GitLog};
 use support::Fixture;
 
+#[tokio::test]
+async fn the_whole_workspace_is_a_path_a_model_can_ask_for() {
+    // `path: "."` resolves to the workspace root, which strips to the empty string --
+    // and `git --no-pager diff -- ""` exits 128 with "empty string is not a valid
+    // pathspec. please use . instead if you meant to match all paths". Git's own advice is
+    // the input that produced the error, so a model that follows it loops. An empty
+    // pathspec means "everything", and so does emitting none, which is what `Argv` now
+    // does with it.
+    for spelling in [".", "./"] {
+        let fixture = Fixture::new();
+        GitDiff
+            .execute(fixture.ctx(), serde_json::json!({ "path": spelling }))
+            .await
+            .unwrap_or_else(|e| panic!("`{spelling}` is the workspace: {e}"));
+        let args = fixture.host.only_call().args;
+        assert!(
+            !args.iter().any(String::is_empty),
+            "`{spelling}`: git rejects an empty pathspec outright: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--"),
+            "`{spelling}`: a separator with nothing after it is what produced the empty \
+             pathspec: {args:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_whole_workspace_is_a_path_git_log_can_ask_for_too() {
+    // The same door, the other caller. Guarding `Argv::pathspec` rather than both call
+    // sites is why this one needed no separate fix.
+    let fixture = Fixture::new();
+    GitLog
+        .execute(fixture.ctx(), serde_json::json!({ "path": "." }))
+        .await
+        .expect("`.` is the workspace");
+    let args = fixture.host.only_call().args;
+    assert!(!args.iter().any(|a| a.is_empty() || a == "--"), "{args:?}");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_git_path_argument_cannot_leave_the_workspace_through_a_link() {

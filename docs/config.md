@@ -308,6 +308,13 @@ plugin이 같은 이름의 도구를 등록하면? 그때는 `default.grant`가 
 require_approval_for_all_in = ["production"]   # 기본값
 ```
 
+여기 적힌 프로파일에서는 승인 프롬프트가 `a`(이번 세션 동안 기억)를 제공하고, 기억되는
+단위는 **도구 이름**이다 — 도구의 도달 범위는 자기 스키마와 봉쇄가 정하므로 사람이 한 번
+보고 판단할 수 있는 단위다. 예외가 하나 있다: 파괴적 형태에 걸린 셸 명령은 이 규칙보다
+**먼저** 걸러지므로 `shell:<program>` 키로 물어보고 `a`를 제공하지 않는다. 그렇지 않으면
+셸을 가진 프로파일을 이 목록에 넣는 것만으로 "셸 게이트는 기억되지 않는다"가 뒤집힌다
+(`a_profile_that_approves_everything_cannot_remember_a_shell_gate`).
+
 Phase 2부터 프로파일의 권한 집합은 각 plugin의 매니페스트와 **실제로 교집합된다.**
 `readonly`에서 `rivet.tool-filesystem`의 `fs_write`가 사라지고, 그래서 `write_file`이
 애초에 등록되지 않는다. `rivet plugin show rivet.tool-filesystem --profile readonly`가

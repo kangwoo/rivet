@@ -3,10 +3,11 @@
 //! # Every argument goes through `Argv`
 //!
 //! Not one `Vec<String>` and not one `push`. [`rivet_runtime::argv::Argv`] has four doors —
-//! a `&'static str` flag the tool chose, a value bound to the option before it, a
-//! free-standing operand that is refused when it could be read as an option, and a pathspec
-//! that lands after the `--` separator the builder emits. Adding an argument means picking
-//! one, and every one of them is safe.
+//! a `&'static str` flag the tool chose, a value bound to a
+//! [`rivet_runtime::argv::Consuming`] option, a free-standing operand that is
+//! refused when it could be read as an option, and a pathspec that lands after the `--`
+//! separator the builder emits. Adding an argument means picking one, and every one of them
+//! is safe.
 //!
 //! That is a change of shape rather than of rule. The rule — put `--` before a path so "a
 //! path that looks like a revision is still a path" — was already here, applied at the call
@@ -19,7 +20,7 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use rivet_core::sandbox::{ExecOutput, ExecSpec};
 use rivet_core::tool::{Tool, ToolAnnotations, ToolContext, ToolResult, ToolSpec};
-use rivet_runtime::argv::Argv;
+use rivet_runtime::argv::{Argv, Consuming};
 
 /// The program. Named by the tool, never by the model.
 const PROGRAM: &str = "git";
@@ -257,7 +258,7 @@ impl Tool for GitLog {
         // `--max-count <n>` rather than `--max-count=<n>`: the separate form binds the value
         // to the option, so the number never becomes an argv entry of its own even if a
         // later change lets a wider range through the schema.
-        argv.option("--max-count", &limit.to_string());
+        argv.option(Consuming::MAX_COUNT, &limit.to_string());
         argv.flag("--oneline");
         argv.flag("--no-decorate");
         if let Some(path) = optional_str(&input, "path") {
@@ -319,7 +320,7 @@ impl Tool for GitCommit {
         // Bound to `-m`, which consumes the next entry verbatim -- so a message that opens
         // with `--amend` is a strange message rather than an amend, and refusing it would be
         // refusing something that was never dangerous.
-        argv.option("-m", message);
+        argv.option(Consuming::MESSAGE, message);
         let output = run(&ctx, argv).await?;
         Ok(render("git commit", &output))
     }
