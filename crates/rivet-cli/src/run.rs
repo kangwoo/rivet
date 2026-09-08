@@ -273,10 +273,26 @@ async fn drive(
     let cancel = CancellationToken::new();
     let signals = crate::signals::install(cancel.clone());
 
+    // Who can answer an approval, and therefore whether this run is attended at all.
+    //
+    // `Config::unattended` records what the *operator* said — `--headless`, or the `ci`
+    // profile. Whether a human can actually be reached is a different question, and only
+    // this layer knows the answer: it depends on the output mode and on whether stdin is a
+    // terminal. A run piped from `/dev/null` without `--headless` has nobody to ask, and a
+    // prompt there would hang on a read that never returns.
+    let sink: Option<Arc<dyn rivet_core::policy::ApprovalSink>> = match (output, &watching.tui) {
+        (Output::Tui, Some(tui)) => Some(tui.clone()),
+        (Output::Tui, None) => None,
+        (Output::Human | Output::Jsonl, _) => crate::render::approve::PromptApprover::for_stdin()
+            .map(|approver| Arc::new(approver) as Arc<dyn rivet_core::policy::ApprovalSink>),
+    };
+
     let mut cfg = RunConfig::new(agent, session_id, config.workspace.clone());
     cfg.profile = config.profile.name().to_string();
-    cfg.unattended = config.unattended;
+    cfg.unattended = unattended(config.unattended, sink.is_some());
     cfg.permissions = config.profile.permissions();
+    cfg.sandbox_provider = Some(config.sandbox_provider.clone());
+    cfg.approval_sink = sink;
     cfg.cancel = cancel.clone();
 
     let agent_loop = AgentLoop::new(
@@ -340,6 +356,18 @@ async fn drive(
         report(&summary);
     }
     Ok(summary)
+}
+
+/// Whether this run has nobody to ask.
+///
+/// Two independent reasons, and they are both real. `configured` is what the *operator*
+/// said — `--headless`, or the `ci` profile. `has_sink` is whether a human can actually be
+/// reached, which only this layer knows: it depends on the output mode and on whether stdin
+/// is a terminal. A run piped from `/dev/null` without `--headless` has nobody to ask, and
+/// a prompt there would park on a read that never returns — which is exactly the hang
+/// `--headless` exists to prevent, arriving through a door nobody marked.
+fn unattended(configured: bool, has_sink: bool) -> bool {
+    configured || !has_sink
 }
 
 /// Print what the TUI was showing, once the alternate screen is gone.
@@ -552,6 +580,21 @@ mod tests {
         assert_eq!(
             Reaction::to(Intent::Cancel, &mut asked),
             Reaction::ForceExit
+        );
+    }
+
+    #[test]
+    fn a_non_tty_stdin_marks_a_run_unattended() {
+        // The half `render::approve` cannot decide for itself: it can say there is no sink,
+        // and this is what that costs the run.
+        assert!(
+            unattended(false, false),
+            "nowhere to ask means the approval is refused rather than waited on"
+        );
+        assert!(unattended(true, true), "`--headless` still wins on its own");
+        assert!(
+            !unattended(false, true),
+            "and an ordinary terminal run asks"
         );
     }
 

@@ -1,0 +1,12 @@
+[plugin]
+id           = "rivet.policy-default"
+name         = "Default policy"
+version      = "0.1.0"
+abi_version  = "0.1"
+description  = "Workspace containment, the profile grant, and a destructive-command gate."
+capabilities = ["policy"]
+
+# No permissions, on purpose. A policy is a *pure function* of `PolicyRequest`: it reads no
+# file, opens no socket and keeps no state. That is the condition that makes a decision
+# reproducible from the session log alone at audit time, so asking for a permission here
+# would be asking for the ability to break it.

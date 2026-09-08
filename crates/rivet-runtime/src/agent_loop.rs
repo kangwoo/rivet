@@ -55,12 +55,14 @@ use rivet_core::id::{RunId, SessionId};
 use rivet_core::model::{
     ContentBlock, Message, Model, ModelParams, ModelRequest, Role, StreamEvent, ToolChoice, Usage,
 };
+use rivet_core::policy::ApprovalSink;
 use rivet_core::retry::{RetryDecision, RetryPolicy};
 use rivet_core::session::{SessionEvent, SessionState, SessionStore};
 use rivet_core::tool::{ToolCall, ToolResult, ToolSpec};
 use rivet_core::workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
+use crate::approval::Approvals;
 use crate::context::ContextAssembler;
 use crate::digest::request_digest;
 use crate::dispatch::{
@@ -85,12 +87,17 @@ pub struct RunConfig {
     pub session_id: SessionId,
     pub run_id: RunId,
     pub workspace: Workspace,
-    /// Named profile in force, carried into every policy request Phase 4 will make.
+    /// Named profile in force, carried into every policy request the chain makes.
     pub profile: String,
     /// True when nothing can ask a human.
     pub unattended: bool,
     /// The grant the profile computed, before any plugin manifest narrows it.
     pub permissions: PermissionSet,
+    /// `[sandbox] provider`, carried to every dispatch as the default confinement.
+    pub sandbox_provider: Option<String>,
+    /// Where an approval goes. `None` means nothing can ask a human, and step 6 refuses
+    /// rather than passing quietly — see [`crate::approval`].
+    pub approval_sink: Option<Arc<dyn ApprovalSink>>,
     /// Tripped by Ctrl-C. The deadline gets its own, and tools see both.
     pub cancel: CancellationToken,
     pub tool_timeout_ms: Option<u64>,
@@ -111,6 +118,8 @@ impl RunConfig {
             profile: "developer".to_string(),
             unattended: false,
             permissions: PermissionSet::empty(),
+            sandbox_provider: None,
+            approval_sink: None,
             cancel: CancellationToken::new(),
             tool_timeout_ms: Some(120_000),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
@@ -205,9 +214,16 @@ impl AgentLoop {
 
         let clock = Watchdog::start(&cfg, limits.max_duration_ms);
         let mut tally = Tally::default();
+        // Seeded from the log's own projection, which is the whole of "a remembered
+        // approval survives a resume": the grants a person made in an earlier run are
+        // exactly the ones replay put here.
+        let approvals = Approvals::new(cfg.approval_sink.clone())
+            .with_remembered(state.remembered_approvals().to_vec());
 
         let stop = self
-            .turns(&cfg, &model, &writer, &clock, &mut state, &mut tally)
+            .turns(
+                &cfg, &model, &writer, &clock, &approvals, &mut state, &mut tally,
+            )
             .await;
         // Whatever happened, the watchdog stops here.
         clock.stop();
@@ -252,12 +268,14 @@ impl AgentLoop {
     }
 
     /// The turn loop proper.
+    #[allow(clippy::too_many_arguments)] // Each one is a distinct thing a turn needs.
     async fn turns(
         &self,
         cfg: &RunConfig,
         model: &Arc<dyn Model>,
         writer: &SessionWriter,
         clock: &Watchdog,
+        approvals: &Approvals,
         state: &mut SessionState,
         tally: &mut Tally,
     ) -> rivet_core::Result<StopReason> {
@@ -329,7 +347,7 @@ impl AgentLoop {
                         .cloned()
                         .collect();
                     if let Some(stop) = self
-                        .run_tools(cfg, writer, clock, state, tally, calls)
+                        .run_tools(cfg, writer, clock, approvals, state, tally, calls)
                         .await?
                     {
                         return Ok(stop);
@@ -356,15 +374,13 @@ impl AgentLoop {
         // under the limit, gets told it fits, and is refused by the `count_tokens`
         // re-check below -- deterministically, so `resume` would do it again.
         let mut tools = Vec::new();
-        for name in self.registry.tool_names().await {
+        for spec in self.registry.tool_specs().await {
             // Pipeline step 2 applied ahead of time: a tool outside the agent's scope is
             // never offered, so the model does not spend a turn being refused.
-            if !cfg.agent.allows_tool(&name) {
+            if !cfg.agent.allows_tool(&spec.name) {
                 continue;
             }
-            if let Some(tool) = self.registry.tool(&name).await {
-                tools.push(tool.spec());
-            }
+            tools.push((*spec).clone());
         }
         let tool_tokens = estimate_tool_tokens(&tools);
 
@@ -563,11 +579,13 @@ impl AgentLoop {
     /// Run a turn's tool calls in order, closing whatever is left if the turn ends early.
     ///
     /// Returns `Some(stop)` when the run is over.
+    #[allow(clippy::too_many_arguments)] // Each one is a distinct thing a turn needs.
     async fn run_tools(
         &self,
         cfg: &RunConfig,
         writer: &SessionWriter,
         clock: &Watchdog,
+        approvals: &Approvals,
         state: &mut SessionState,
         tally: &mut Tally,
         calls: Vec<ToolCall>,
@@ -584,6 +602,8 @@ impl AgentLoop {
             unattended: cfg.unattended,
             timeout_ms: cfg.tool_timeout_ms,
             max_output_bytes: cfg.max_output_bytes,
+            sandbox_provider: cfg.sandbox_provider.clone(),
+            approvals: approvals.clone(),
             cancel: clock.effective.clone(),
             grace: cfg.cancel_grace,
         };

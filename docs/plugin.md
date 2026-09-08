@@ -17,7 +17,7 @@ Plugin이 하는 일은 하나다: **넘겨받은 registry에 capability를 등�
 | `Model` | `Model` | LLM provider |
 | `Tool` | `Tool` | 모델에게 제공되는 실행 능력 |
 | `ContextProvider` | `ContextProvider` | 프롬프트에 들어갈 정보 |
-| `Policy` | `Policy` | 허가 판단 |
+| `Policy` | `Policy` | 허가 판단 (`Interceptor`도 이 슬롯을 쓴다 — 아래 각주) |
 | `Sandbox` | `Sandbox` | 실행 격리 |
 | `SessionStore` | `SessionStore` | 세션 영속화 |
 | `Memory` | `Memory` | 회상·기억 |
@@ -30,6 +30,14 @@ Plugin이 하는 일은 하나다: **넘겨받은 registry에 capability를 등�
 > `Command`에 각주: `docs/plan.md`의 Phase 3 작업 항목(3.1–3.5)에 CLI 하위 명령이 없다.
 > 작업 항목의 출처는 plan.md이므로 Phase 3은 이것을 만들지 않았다. 이 표와 plan.md 중
 > 어느 쪽이 틀렸는지는 그 명령이 실제로 필요해지는 Phase에서 정한다.
+
+> `Policy`에 각주: `Interceptor`에 대응하는 `CapabilityKind`가 **없다.** 매니페스트 guard가
+> `register_interceptor`를 매핑할 슬롯이 없으므로 잠정적으로 `capabilities = ["policy"]`를
+> 요구한다. Phase 4는 interceptor의 **실행 경로**를 만들었지만 — 동시 실행, 개별 2초
+> 타임아웃, 정책과 같은 fold — 이 빌드가 싣는 plugin 중 interceptor를 등록하는 것은
+> **하나도 없다.** 그래서 변형을 추가하지 않는 이유가 "Phase 2의 범위 밖"에서 **"요청자가
+> 없다"**로 바뀌었다. 닫힌 어휘를 넓히는 것은 모든 매니페스트의 wire 표현에 영향을 주므로,
+> 실제로 interceptor를 싣는 plugin이 나올 때 연다. [`architecture.md`](./architecture.md) §11-11.
 
 ---
 
@@ -329,18 +337,20 @@ if ctx.permissions.allows(&Permission::FsWrite(FsScope::Workspace)) {
 }
 ```
 
-> **⚠ 어느 프로파일도 주지 않는 permission이 셋 있다** — `process_spawn`, `secrets_read`,
-> `job_manage`. `Profile::permissions()`가 주는 것은 `fs_read(workspace)` ·
-> `session_read` · `session_write` · `events_publish` · `network_http` ·
-> `events_subscribe`, 그리고 쓰기 가능한 프로파일의 `fs_write(workspace)`뿐이다.
+> **⚠ 어느 프로파일도 주지 않는 permission이 둘 있다** — `secrets_read`와 `job_manage`.
+> 셋이었고, **`process_spawn`은 Phase 4에서 닫혔다**: `production`을 뺀 네 프로파일이
+> 준다. 그래서 `rivet.tool-shell`과 `rivet.tool-git`은 실제로 로드되고, 어느 프로파일에서
+> 무엇을 등록하는지는 아래 관용구 (2)가 정한다.
 >
-> Phase 2부터 교집합이 실제로 계산되므로, 이 셋 중 하나를 매니페스트에 적은 plugin은
-> **모든 프로파일에서** 그 권한이 0개가 된다. 그 위에 관용구 (1)을 얹으면 그 plugin은
-> 어디서도 로드되지 않는다 — `developer`에서도. (이 문단의 예시가 원래
-> `rivet.tool-shell` + `process_spawn`이었던 이유이고, 그래서 실제로 동작하는
-> `rivet.model-openai`로 바꿨다.) 매니페스트 파서가 `secrets_read`에 비어 있지 않은 키
-> 목록을 요구하는 것은 **어휘가** 완성돼 있다는 뜻이지 프로파일이 그것을 준다는 뜻이
-> 아니다.
+> `Profile::permissions()`가 주는 것은 `fs_read(workspace)` · `session_read` ·
+> `session_write` · `events_publish` · `network_http` · `events_subscribe`, 쓰기 가능한
+> 프로파일의 `fs_write(workspace)`, 그리고 `production`을 뺀 네 프로파일의
+> `process_spawn`이다.
+>
+> 남은 둘 중 하나를 매니페스트에 적은 plugin은 **모든 프로파일에서** 그 권한이 0개가 된다.
+> 그 위에 관용구 (1)을 얹으면 그 plugin은 어디서도 로드되지 않는다 — `developer`에서도.
+> 매니페스트 파서가 `secrets_read`에 비어 있지 않은 키 목록을 요구하는 것은 **어휘가**
+> 완성돼 있다는 뜻이지 프로파일이 그것을 준다는 뜻이 아니다.
 >
 > 지금 그런 슬롯이 필요하면 관용구 (2)로 축소 등록하는 수밖에 없다. 프로파일이 그
 > 권한을 주도록 바꾸는 것은 정리가 아니라 **보안 결정**이라 열어 두었다 —
@@ -352,10 +362,27 @@ if ctx.permissions.allows(&Permission::FsWrite(FsScope::Workspace)) {
 읽기 도구들을 워크스페이스 안에 가두는 것은 grant가 아니라 `Workspace::resolve`와
 런타임의 fsguard다. 그래서 `fs_read({ subtree = "docs" })`를 선언한 매니페스트도
 워크스페이스 전체를 읽는 `read_file`을 받고, `rivet plugin show`는 그것을 `granted`로
-출력한다. 즉 **읽기 scope는 지금 선언이지 강제가 아니다.** 도구별 경로 범위를 실제로
-좁히는 것은 Phase 4의 sandbox이고, 파서가 탈출 서브트리를 지금 거부하는 것은 그 강제가
-붙는 시점에 어휘가 이미 정확하도록 하기 위해서다. 쓰기 쪽(`fs_write`)은 DoD 3이며 지금도
-진짜다.
+출력한다. 즉 **읽기 scope는 지금도 선언이지 강제가 아니다.** Phase 4의 `sandbox-local`은
+`filesystem_isolation: false`를 신고하므로 이것을 좁히지 않았고, 좁히려면 실제로 격리하는
+provider가 필요하다. 파서가 탈출 서브트리를 거부하는 것은 그 강제가 붙는 시점에 어휘가
+이미 정확하도록 하기 위해서다. 쓰기 쪽(`fs_write`)은 지금도 진짜다.
+
+**읽기 전용 도구는 `annotations.read_only = true`를 적어야 한다.** `ToolAnnotations::default()`
+는 `read_only: false`이고, Phase 4의 `default.grant`는 그 기본값을 "변이한다"로 읽는다 —
+`fs_write`가 없는 grant 아래에서 그런 호출은 거부된다. 즉 annotations를 **빠뜨린** 읽기
+도구는 `readonly`·`reviewer`·`production`에서 돌지 않는다. 방향은 맞지만(모르는 것을
+변이한다고 보는 것이 fail-closed다) 조용하면 안 되므로, 거부 사유가 "이 도구는 `read_only`를
+선언하지 않았다"를 명시적으로 말한다. 거짓말은 반대 방향이다: `read_only: true`라고 적은
+도구는 이 층을 지난다 — annotations는 자기 신고이고,
+[`security.md`](./security.md) §5가 in-process plugin을 신뢰된 코드로 못박았으므로 이 층이
+막는 것은 *악의*가 아니라 *실수*다.
+
+**정책은 파일시스템을 보지 않는다.** `Policy`는 `PolicyRequest`의 **순수 함수**여야 한다 —
+전역 상태를 읽지 않고, 파일을 열지 않고, 평가 순서에 의존하지 않는다. 그것이 감사 시점에
+세션 로그만으로 결정을 재현할 수 있게 하는 조건이고, `PolicyRequest`에 파일시스템 핸들이
+없다는 것이 유일한 강제다. 그래서 `rivet.policy-default`의 매니페스트에는 permission이
+하나도 없다 — 경로 봉쇄조차 **어휘적**으로 한다. 연 *뒤에* 다시 검사하는 층은 정책이 아니라
+`rivet_runtime::fsguard`이고, 그것은 도구 안에서 돈다.
 
 ### 4.3 `Err` 와 `is_error` 를 구분한다
 
@@ -407,6 +434,63 @@ let output = ctx.host.exec(ExecSpec::new("cargo", ["test".into()])).await?;
 ```
 
 직접 spawn한 프로세스는 Policy가 고른 격리 밖에서 돌고, 취소 시 고아로 남는다.
+
+**Phase 4부터 이 API는 실제로 동작한다.** `ctx.host.exec`는 파이프라인 7단계가 정한
+provider로 위임한다. 그 provider가 등록되어 있지 않으면 여기서 — 그리고 **여기서만** —
+`NotFound`가 나오고, 에러가 찾지 못한 이름을 말한다:
+
+```text
+no sandbox provider named `local` is registered, and `sh` needs one to run a process
+```
+
+7단계 자체는 막지 않는다. 그 자리는 **모든** 도구 호출이 지나므로, 거기서 거부하면
+`production`(프로세스 권한이 없어 `sandbox-local`이 0개를 등록한다)에서 `read_file`까지
+막히고, `enabled` 목록을 손으로 적어 둔 기존 `rivet.toml`은 업그레이드만으로 모든 호출이
+막힌다. 불변식은 이렇게 쓴다: **판정이 요구한 샌드박스 밖에서는 어떤 프로세스도 뜨지 않고,
+프로세스를 띄우지 않는 호출은 샌드박스가 없다는 이유로 막히지 않는다.** `rivet doctor`가
+run 전에 같은 조회를 하고, 프로세스를 띄울 수 있는 plugin이 실제로 로드된 경우에만
+exit 2를 낸다.
+
+**호스트 프로세스가 `kill -9`를 맞으면 자식 그룹이 남는다.** 어떤 런타임 코드도 그것을
+막을 수 없다. 정상 경로에서는 디스패처가 모든 경로 — 성공·에러·패닉·취소 — 에서
+`teardown()`을 부르고, `sandbox-local`은 자식 **그룹**에 `SIGTERM` → 유예 → `SIGKILL`을
+보낸다.
+
+### 4.5c argv는 `Argv`로 짓는다 — `Vec<String>`으로 짓지 않는다
+
+모델이 준 문자열을 argv에 그대로 넣으면 `-` 하나 차이로 **값이 아니라 옵션**이 된다.
+
+```text
+git --no-pager diff --output=../ESCAPED     # exit 0, 워킹 디렉터리 위에 파일을 쓴다
+```
+
+`read_only`를 신고한 도구가, `fs_write`를 전혀 주지 않는 프로파일에서 그렇게 한다. 이것을
+막을 층이 하나도 없다: 스키마 검증은 `{"type":"string"}`이 값에 대해 아무 말도 하지 않으므로
+통과하고, `default.workspace`는 `path`와 `cwd`만 보므로 `rev`를 보지 못하며,
+`sandbox-local`은 `filesystem_isolation: false`라 밑에서도 막지 않는다.
+
+그래서 **규칙이 아니라 타입으로** 막는다. [`rivet_runtime::argv::Argv`]에는 `push`가 없고
+문이 넷뿐이며, 넷 다 각자의 방식으로 안전하다.
+
+| 문 | 누가 골랐나 | 왜 안전한가 |
+|---|---|---|
+| `flag(&'static str)` | 도구 | 모델 JSON에서 읽은 문자열은 `'static`이 아니다 |
+| `option(&'static str, value)` | 모델 | 앞의 옵션이 그대로 삼킨다 (`-m <message>`, `-c <command>`) |
+| `operand(what, value)` | 모델 | 옵션으로 읽힐 수 있으면 **거부한다** |
+| `pathspec(path)` | 모델 | `--` 뒤에 놓인다. 그 `--`는 빌더가 넣지 호출자가 넣지 않는다 |
+
+인자를 새로 더한다는 것은 문을 하나 고른다는 뜻이고, 넷 다 닫혀 있다. 규칙을 **호출
+지점마다** 적용하면 다음 인자가 엉뚱한 자리에 추가되면서 그 규칙을 건너뛴다 —
+`tool-git`의 `path`는 `--` 뒤에 있었고 `rev`는 두 줄 위에서 맨몸으로 push됐다.
+
+`operand`의 거부는 `PolicyDenied`다. 탈출하는 경로와 같은 종류이고 같은 이유다:
+디스패처가 `tool.blocked`으로 기록하므로 워크스페이스 밖으로 나가려던 시도가 스크롤되어
+사라지는 도구 결과가 아니라 남는 사실이 된다.
+
+> `git`에는 2.24부터 `--end-of-options`가 있고 git에 한정하면 그쪽이 정석이다. 여기서
+> 쓰지 않는 이유는 이 모듈을 `tool-shell`도 쓰기 때문이다 — "모델이 준 값은 옵션으로
+> 파싱되지 않는다"는 성질은 어느 프로그램에 대해서도 성립해야 하고, 선행 `-` 거부는
+> 버전 하한도 필요 없으며 모델에게 고칠 수 있는 이유를 준다.
 
 ### 4.6 `ToolContext`는 두 조각이다
 

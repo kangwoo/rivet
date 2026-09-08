@@ -292,7 +292,7 @@ rivet plugin show rivet.tool-filesystem
 
 - **3.1 전체 이벤트를 발행 지점에 연결** — `every_bus_topic_is_claimed`이 28개 토픽을
   **와일드카드 없는 두 층 `match`**로 20개(발행됨)와 8개(Phase 4의 셋 · Phase 5의 다섯)로
-  가른다. 토픽이나 패밀리가 새로 생기면 컴파일에 실패한다. 실제 발행은
+  갈랐다 — Phase 4가 그 셋을 발행하면서 23 대 5가 됐고, 그 편집을 강제한 것이 이 tripwire다. 토픽이나 패밀리가 새로 생기면 컴파일에 실패한다. 실제 발행은
   `a_run_publishes_every_agent_and_tool_topic_this_phase_owns`(13개를 한 대본으로)와
   `a_host_lifecycle_publishes_every_runtime_and_plugin_topic_this_phase_owns`,
   `runtime_started_precedes_everything_it_would_describe`가 본다. `runtime.started`·
@@ -393,12 +393,26 @@ unsafe tool → policy → approval | deny → sandbox → execution
 
 ### DoD
 
-- [ ] `--headless`에서 승인 요구가 매달리지 않고 거부됨
-- [ ] 승인/거부가 세션 로그에 durable event로 남음
-- [ ] resume 후에도 "세션 동안 기억" 승인이 유지됨
-- [ ] 취소 시 프로세스 트리 전체 종료 (좀비 없음)
-- [ ] 거부된 도구가 세션에 `ToolBlocked`로 남고 모델이 사유를 봄
-- [ ] `readonly` 프로파일에서 `write_file`이 실제로 거부됨
+- [x] `--headless`에서 승인 요구가 매달리지 않고 거부됨
+      (`a_headless_run_denies_an_approval_instead_of_waiting` — sink가 불리면 `panic!`한다 ·
+      e2e `headless_refuses_a_destructive_command_without_hanging`)
+- [x] 승인/거부가 세션 로그에 durable event로 남음
+      (`an_approval_leaves_a_requested_and_a_resolved_in_the_log` · 버스 쪽은
+      `the_bus_carries_both_approval_topics`)
+- [x] resume 후에도 "세션 동안 기억" 승인이 유지됨
+      (`a_replayed_grant_skips_the_sink_on_the_next_run` — 로그를 replay해 만든
+      `SessionState`로 두 번째 run을 시작하고, 그 run의 sink는 불리면 `panic!`한다)
+- [x] 취소 시 프로세스 트리 전체 종료 (좀비 없음)
+      (`cancelling_kills_the_whole_process_tree` · 소유권 쪽은
+      `an_abandoned_tool_task_still_gets_its_sandbox_torn_down`)
+- [x] 거부된 도구가 세션에 `ToolBlocked`로 남고 모델이 사유를 봄
+      (`a_denied_call_is_blocked_and_the_model_reads_the_reason`)
+- [x] `readonly` 프로파일에서 `write_file`이 실제로 거부됨 — 두 층이므로 두 테스트다.
+      등록층은 Phase 2의 `a_readonly_profile_leaves_write_file_unregistered`,
+      정책층은 `a_readonly_profile_denies_a_write_even_if_the_tool_is_registered`
+      (로더를 지나지 않고 레지스트리에 직접 넣은 쓰기 도구를 `default.grant`가 막는다)
+
+설계: [`design/phase-4-policy-sandbox.md`](./design/phase-4-policy-sandbox.md).
 
 ---
 
@@ -490,7 +504,9 @@ rivet plugin list                          # 이 빌드의 plugin 목록 + 어�
 rivet plugin show rivet.tool-filesystem    # 권한 교집합 표시
 rivet plugin new acme.tool-lint            # 새 plugin crate 스캐폴딩
 
-# Phase 4
+# Phase 4  -- 둘 다 테스트로 대체되어 있다 (실제 provider 없이 성립함을 보인다):
+#   readonly_offers_no_write_tool_and_the_model_is_told
+#   headless_refuses_a_destructive_command_without_hanging
 rivet --profile readonly "delete all logs" # 거부되어야 함
 rivet --headless "rm -rf /"                # 매달리지 않고 거부
 
@@ -509,7 +525,13 @@ rivet job list
 | 1 Minimal Agent | ✅ 완료 | 385 passed (+250) · clippy 0 · `cargo doc` 0 · DoD 8개 전부 충족 (1번은 실제 provider 수동 검증) · build 리뷰 지적 11건 반영 |
 | 2 Plugin | ✅ 완료 | 456 passed (+71) · clippy 0 · `cargo doc` 0 · DoD 5개 전부 충족 · 롤백 무결성(`Err`·패닉·`load` 이후의 뒤늦은 등록) 테스트로 확인 · 설계 [`design/phase-2-plugin-loader.md`](./design/phase-2-plugin-loader.md) · 리뷰 2라운드 지적 반영(등록 창구 봉인 · 배치 승격 범위 · `plugin show`의 ABI 거부 표시) · 리뷰 3라운드 반영(성공 경로 봉인 테스트 · ABI 판정 단일 출처 · `seal` 비공개화) |
 | 3 Event | ✅ 완료 | 559 passed (+92) · clippy 0 · `cargo doc` 0 · DoD 6개 전부 충족 · `rivet-tui`에서 `rivet-runtime` 의존 제거(컴파일 성질) · `events_subscribe` scope 강제(`architecture.md` §11-10 닫힘) · 새 plugin `rivet.telemetry-log`(기본 선택 밖) · 설계 [`design/phase-3-event.md`](./design/phase-3-event.md) · 리뷰 2라운드 지적 반영 · 구현 중 발견해 고친 것: 랙 보고 되먹임 폭주(40 → 118,312) |
-| 4 Policy/Sandbox | ⬜ | 심볼릭 링크 탈출 차단 |
+| 4 Policy/Sandbox | ✅ 완료 | 760 passed (+181, base 579 — 표 아래 각주) · clippy 0 · `cargo doc` 0 · DoD 6개 전부 충족 · 심볼릭 링크 탈출 차단(`cwd`와 git 경로 인자 양쪽, `a_symlinked_cwd_pointing_outside_the_workspace_is_refused` · `a_git_path_argument_cannot_leave_the_workspace_through_a_link`) · 새 plugin 넷(`policy-default` `sandbox-local` `tool-shell` `tool-git`, 전부 기본 선택) · `ProcessSpawn`이 처음으로 주어짐(`architecture.md` §11-10 닫힘) · §11-7(비-UTF-8) · §11-14(spec 등록 시점 고정) 닫힘 · §11-9(도구 egress)는 의도적으로 다시 열어 **물려받음** · 설계 [`design/phase-4-policy-sandbox.md`](./design/phase-4-policy-sandbox.md) · 리뷰 4라운드: 1–3라운드 blocking은 전부 설계 단계에서 닫혔고(미등록 provider를 7단계·`doctor` 양쪽에서 거부로 만들던 것 · DoD 6을 증명할 정책이 체인에 없던 것 · 기존 단언 둘을 깨뜨리던 것), 4라운드 non-blocking 넷을 빌드에서 반영(`plugin.md`의 `process_spawn` 블록 · 관계 단언을 `BTreeSet` 비교로 · `every_capability_slot_is_readable`에 sandbox 슬롯 · 동시성 테스트 여유 1.67배 → 2배) · 구현 중 발견해 고친 것: 상속된 파이프를 쥔 손자가 끝난 호출을 무한정 붙잡는 것, 탈출하는 심볼릭 링크가 `git` 경로 인자에서 부모 검사로 새는 것 · **빌드 리뷰 1라운드 blocking: argv 주입 취약점** — `git_diff`의 `rev`가 검증 없이 argv로 들어가 `rev = "--output=…"`이 워크스페이스 밖에 파일을 쓴다(`read_only`를 신고한 도구가, `fs_write`를 주지 않는 `readonly`·`reviewer`에서). 호출 지점마다 검사를 더하는 대신 규칙을 타입으로 옮겼다 — `rivet_runtime::argv::Argv`(신규, `push` 없음, 문 넷: `&'static str` flag · 옵션에 묶인 값 · 옵션으로 읽힐 수 있으면 거부하는 operand · `--` 뒤의 pathspec)를 `tool-git`·`tool-shell`의 **모든** argv 항목이 지난다. 붙드는 테스트도 인자 이름을 나열하지 않는다: `no_declared_argument_can_become_an_option`이 스키마를 훑어 선언된 모든 문자열 인자에 옵션 모양의 값을 먹이고, e2e `a_readonly_run_cannot_write_through_a_git_argument`가 실제 바이너리로 파일이 없음을 단언한다 · 빌드 리뷰 1라운드 non-blocking 여섯도 반영(C1 회귀 테스트 · `settle`의 리더 `abort` · `tool.called` append를 scope 위로 올려 teardown을 함수의 모양으로 보장 · 승인 쌍의 requested 단언 · 패닉 경로 teardown 테스트 · `tool.policy.evaluated` 커버리지) · 빌드 리뷰 2라운드 PASS(blocking 없음) |
 | 5 Job Runtime | ⬜ | Demo 무개입 완주 |
 | 6 External Plugin | ⬜ | 동일 소스 양쪽 동작 |
 | 7 Distributed | ⬜ | 계약 변경 없이 분산 구현 |
+
+> **각 행의 `(+N)`은 그 Phase의 base 커밋 대비 증가분이지, 윗줄의 수에서 이어지는 것이 아니다.**
+> 두 수가 갈라질 수 있다: 어떤 행의 수는 그 Phase가 **끝난 시점**의 수이고, 다음 Phase는 그
+> 뒤에 얹힌 커밋들 위에서 시작하기 때문이다. Phase 4가 그 경우다 — Phase 3 행의 559는 Phase 3
+> 종료 시점의 수이고, Phase 4의 base인 `4c7bfae`에서 실측하면 **579**다. 그래서 559 + 181이
+> 아니라 579 + 181 = 760이다. 행마다 base를 적는 것은 그 차이가 실제로 생겼을 때뿐이다.

@@ -141,7 +141,7 @@ tool.requested                 call_id, name
 tool.policy.evaluated          call_id, decision(Box), policy
 tool.approval.requested        call_id, reason
 tool.approval.resolved         call_id, approved
-tool.execute.started           call_id, name, sandboxed
+tool.execute.started           call_id, name, sandboxed  ← 아래 정의를 볼 것
 tool.execute.progress          call_id, message           ← 저장 안 됨
 tool.execute.completed         call_id, is_error, duration_ms
 tool.blocked                   call_id, reason
@@ -168,9 +168,19 @@ runtime.subscriber.lagged      subscriber, dropped
 `shutting_down`은 unload **전에**. 그래서 언로드되는 plugin의 구독자는
 `runtime.shutting_down`까지는 보고 그 뒤의 `plugin.unloaded`는 못 본다.
 
-**어느 것이 실제로 발행되는가.** 28개 중 20개는 이 트리에 발행 지점이 있고, 8개는 아직
-없다 — `tool.policy.evaluated` · `tool.approval.requested` · `tool.approval.resolved`는
-Phase 4, `job.*` 다섯은 Phase 5다. 그 분류를 코드 주석이 아니라 테스트가 붙든다:
+**`sandboxed`의 뜻.** "이 호출이 프로세스를 띄운다면 **등록된** `<provider>` 아래에서
+돈다"이지 "프로세스가 돌았다"가 아니다. 파이프라인 7단계는 레지스트리를 조회만 하고, 실제
+준비(`Sandbox::prepare`)는 첫 `exec`까지 미룬다 — 대부분의 호출은 프로세스를 띄우지 않고,
+`docker` 같은 provider의 `prepare`는 싸지 않다. 그래서 발행 시점에 알 수 있는 것은 조회
+결과뿐이다. `production`이나 샌드박스 plugin이 없는 설정에서는 `false`이고, 그런 호출은
+프로세스를 띄우지 않으므로 그 사실을 만날 일도 없다.
+
+**어느 것이 실제로 발행되는가.** 28개 중 23개는 이 트리에 발행 지점이 있고, 5개는 아직
+없다 — `job.*` 다섯이고 Phase 5다. `tool.policy.evaluated`와 approval 둘은 **Phase 4에서
+발행되기 시작했다**: 정책 판정은 거부만이 아니라 **결정**을 나르므로 허용된 호출에도
+실리고(거부 전용 토픽은 `tool.blocked`로 따로 있다), 승인 쌍은 사람이 답하지 않은 경로에도
+남는다 — 무인 실행에서 거부된 승인이 로그에서 사라지면 감사가 찾는 바로 그 사실이 사라진다.
+그 분류를 코드 주석이 아니라 테스트가 붙든다:
 `every_bus_topic_is_claimed`(`rivet-runtime/tests/event_flow.rs`)이 `Event::one_of_each()`를
 **와일드카드 없는 두 층 `match`**로 훑어 각 변형을 "발행됨" 또는 "Phase N 대기"로 분류하고
 두 기대 목록과 대조한다. 토픽이 새로 생기면 그 `match`가 컴파일에 실패한다.
@@ -257,7 +267,7 @@ runtime.subscriber.lagged { subscriber: "metrics", dropped: 1203 }
 
 | | `EventSubscriber` | `Interceptor` |
 |---|---|---|
-| 반환 | 없음 | `Option<PolicyDecision>` |
+| 반환 | 없음 | `Option<RestrictiveDecision>` |
 | 차단 | 불가 | 가능 |
 | 개수 | 임의 | 열거·정렬·타임아웃 |
 
@@ -266,9 +276,13 @@ runtime.subscriber.lagged { subscriber: "metrics", dropped: 1203 }
 impl Interceptor for AuditGate {
     fn name(&self) -> &str { "audit-gate" }
 
-    async fn before_tool_call(&self, req: &PolicyRequest) -> Result<Option<PolicyDecision>> {
+    async fn before_tool_call(&self, req: &PolicyRequest)
+        -> Result<Option<RestrictiveDecision>>
+    {
         if self.is_after_hours() {
-            return Ok(Some(PolicyDecision::Deny { reason: "outside change window".into() }));
+            return Ok(Some(RestrictiveDecision::Deny {
+                reason: "outside change window".into(),
+            }));
         }
         Ok(None)   // 나머지는 Policy chain 에 위임
     }
@@ -285,7 +299,13 @@ interceptor는 결과를 더 엄격하게만 만들 수 있다. 단축을 허용
 
 `priority()`는 사용자가 **어느 이유를 먼저 보는지**만 정한다. 결과는 바꿀 수 없다.
 
-런타임이 타임아웃을 적용하며, 멈춘 interceptor는 `None`으로 처리되고 보고된다.
+런타임이 타임아웃을 적용하며, 멈춘 interceptor는 `None`으로 처리되고 보고된다. Phase 4의
+숫자는 **하나당 2초**이고, 전부 **동시에** 돈다 — 직렬이면 N개의 타임아웃이 더해져 도구 실행
+전 대기가 N × 2초가 되고, 총량 예산 하나를 공유하면 앞선 interceptor의 지연이 뒤의 것을
+기권시킨다. 그건 타이밍이 보안 결정을 바꾸는 것이다. 에러도 타임아웃과 같이 `None`으로
+접는다: `Err`를 `Deny`로 올리면 버그 하나가 런타임을 멈추고, `Allow`로 내리면 확장점이
+조용히 사라진다. 보고는 `tracing::warn!`이고, 그것을 위한 새 토픽은 만들지 않았다 — 계약이
+요구하는 것은 "보고된다"이고 어휘를 넓히는 데는 요청자가 필요하다.
 
 ---
 

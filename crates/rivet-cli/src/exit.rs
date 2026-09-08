@@ -25,8 +25,12 @@ pub fn for_stop(stop: &StopReason) -> i32 {
         StopReason::EndTurn => OK,
         StopReason::Error { .. } => FAILED,
         StopReason::LimitReached { .. } => LIMIT,
-        // Unreachable in Phase 1 -- there is no policy chain yet -- but the arm has to
-        // exist, and Phase 4 fills it in without touching the caller's contract.
+        // Still unreachable, and deliberately so. A policy refusing a *tool call* is a
+        // tool result the model reads and adapts to -- ending the run there would turn
+        // `rivet --profile readonly "delete all logs"` into exit 4 instead of an answer
+        // saying it cannot. This code becomes reachable when a policy refuses the *run*
+        // (a `StartRun` or `LoadPlugin` action), and nothing does that yet. A script that
+        // wants to know a policy blocked something reads `tool.blocked` from `--jsonl`.
         StopReason::PolicyBlocked { .. } => POLICY,
         StopReason::Cancelled => CANCELLED,
     }

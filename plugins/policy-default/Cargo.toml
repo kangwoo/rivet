@@ -15,5 +15,17 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
 
+[dev-dependencies]
+# The manifest is a file, so the tests that keep it honest need the parser.
+rivet-plugin.workspace = true
+# `default.grant` is the policy layer of "readonly really refuses a write", and proving
+# that means running the *real* chain rather than calling `evaluate` directly. The arrow
+# is `plugin -> rivet-runtime`, the same edge `tool-filesystem` already has for `fsguard`;
+# the reverse is never made, in tests either.
+rivet-runtime.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util.workspace = true
+
 [lints]
 workspace = true

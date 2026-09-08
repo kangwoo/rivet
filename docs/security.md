@@ -214,6 +214,21 @@ ExecSpec { env: BTreeMap::new(), .. }   // 상속하지 않는다
 
 `AWS_SECRET_ACCESS_KEY`가 샌드박스로 새려면 누군가 그것을 명시적으로 적어야 한다.
 
+**그 "적는 자리"가 어디인지가 Phase 4에서 생겼다.** `sandbox-local`은 자기 설정 테이블의
+`env_passthrough`를 읽고, 거기 적힌 **이름**만 호스트 환경에서 가져와 자식에게 넣는다.
+값이 아니라 이름이므로 비밀은 설정 파일에도 로그에도 나타나지 않고, `rivet doctor`가 해석된
+이름 목록을 출력한다.
+
+```toml
+[plugins."rivet.sandbox-local"]
+env_passthrough = ["PATH", "HOME", "LANG", "LC_ALL", "TZ"]   # 기본값
+```
+
+`PATH`와 `HOME`이 기본에 있는 것은 그것들 없이는 `cargo`도 `git`도 아예 돌지 않아 "빈 환경"이
+아무도 지키지 않는 규칙이 되기 때문이고, `TERM`이 **없는** 것은 있으면 도구들이 ANSI를 뱉기
+때문이다 — 모델이 읽을 것은 텍스트다. 목록에 비밀을 적는 것은 막지 않는다: 계약이 요구한
+것이 "누군가 명시적으로 적는다"이고 여기가 그 자리다.
+
 ### 취소
 
 ```text
@@ -368,10 +383,10 @@ Policy가 순수 함수여야 하는 이유도 이것이다: 감사 시점에 �
 
 | 프로파일 | fs write | process | network (도구) | 승인 | 용도 |
 |---|---|---|---|---|---|
-| `developer` | 워크스페이스 | ✓ | ✓ | 파괴적 작업만 | 로컬 개발 |
-| `readonly` | ✗ | 제한적 | ✗ | — | 조사·질의 |
-| `reviewer` | ✗ | 읽기 명령만 | ✗ | — | 리뷰 에이전트 |
-| `ci` | 워크스페이스 | ✓ | ✓ | **불가 → 거부** | 무인 실행 |
+| `developer` | 워크스페이스 | ✓ (셸 · git 4) | ✓ | 파괴적 형태만 | 로컬 개발 |
+| `readonly` | ✗ | 제한적 (git 읽기 3) | ✗ | — | 조사·질의 |
+| `reviewer` | ✗ | 읽기 명령만 (git 읽기 3) | ✗ | — | 리뷰 에이전트 |
+| `ci` | 워크스페이스 | ✓ (셸 · git 4) | ✓ | **불가 → 거부** | 무인 실행 |
 | `production` | ✗ | ✗ | 허용 목록 | 전부 | 운영 환경 |
 
 ```bash
@@ -409,24 +424,43 @@ rivet --profile readonly "왜 이 테스트가 실패하지?"
 > `readonly`에 네트워크를 주지 않으면 위의 예시 명령 자체가 돌지 않는다 — 모델을
 > 부르지 못하는 프로파일은 에이전트를 돌릴 수 없다.
 >
-> 그래서 **모든 프로파일이 `NetworkHttp(None)`을 준다.** 이 열이 뜻하는 "도구가 밖으로
-> 나갈 수 있는가"는 Phase 4의 샌드박스가 붙기 전까지 아무것도 강제하지 않으며,
-> `production`의 "허용 목록"도 마찬가지다. 프로파일이 provider 호출만 따로 금지할 수
-> 있으려면 어휘에 별도 permission이 필요하고, 그것은 `rivet-core` 계약 변경이다.
+> 그래서 **모든 프로파일이 `NetworkHttp(None)`을 준다.** Phase 4가 이것을 의도적으로 다시
+> 열었고 — [`architecture.md` §11-9](./architecture.md)가 이름까지 적어 요구한 재검토다 —
+> **물려받기로 했다.** 다시 연 결과는 `sandbox-local`이 `network_isolation: false`를
+> 신고한다는 것이다. 즉 이 열이 뜻하는 "도구가 밖으로 나갈 수 있는가"는 Phase 4에도
+> 아무것도 강제하지 않으며, `production`의 "허용 목록"도 마찬가지다. 프로파일이 provider
+> 호출만 따로 금지할 수 있으려면 어휘에 별도 permission이 필요하고, 그것은 `rivet-core`
+> 계약 변경이다. 강제할 수 있는 provider가 생기기 전에 어휘를 넓히지는 않는다.
 
-> **⚠ `process` 열은 어느 프로파일에서도 *주어지지* 않는다.** `Profile::permissions()`는
-> `ProcessSpawn`을 아무에게도 주지 않는다 — `developer`의 `✓`와 `ci`의 `✓`를 포함해서다.
-> Phase 2부터 `manifest ∩ profile`이 실효를 갖기 시작했으므로, `process_spawn`을 선언한
-> plugin은 **모든 프로파일에서** 그 권한이 빈 채로 로드된다. `network` 열이 반대 방향으로
-> 정직하지 않다면(주긴 주는데 강제하지 않는다), 이 열은 이쪽 방향으로 정직하지 않다:
-> 표가 약속하는 것을 아무도 주지 않는다.
+> **`process` 열은 Phase 4부터 진짜다.** `Profile::permissions()`가 `production`을 뺀
+> 네 프로파일에 `ProcessSpawn`을 준다. `readonly`와 `reviewer`도 받는 것이 결정의 요점이다:
+> 권한 어휘에는 "읽기 명령만"이 없으므로 그 구분을 **도구가** 진다. `tool-git`은 읽기 셋
+> (`git_status`·`git_diff`·`git_log`)을 `process_spawn`만으로 등록하고 `git_commit`은
+> `fs_write`와 함께여야 등록한다. `tool-shell`은 둘 다 요구한다. 그래서 이 표의
+> "제한적"과 "읽기 명령만"이 실제로 뜻하는 것은 **git 읽기 셋뿐**이고, 셸은 쓰기 권한이
+> 있는 두 프로파일에만 간다 — `security.md` §3이 `.git/config`에 대해 적은 문장("git 설정
+> 쓰기 권한은 셸 권한과 같다")을 거꾸로 읽으면 셸 권한은 쓰기 권한이기 때문이다.
+> `production`은 받지 않으므로 그 프로파일에서는 `sandbox-local`이 0개를 등록하고, 어떤
+> 도구도 프로세스를 띄우지 못한다. 이 다섯 줄을 통째로 단언하는 테스트가
+> `the_profile_table_in_security_md_matches_the_code`다.
 >
-> 같은 이유로 `SecretsRead` · `JobManage`도 주는 프로파일이 없다. 셋 다 어휘에는 있고
-> 매니페스트에 적을 수 있으며 — `secrets_read`는 파서가 비어 있지 않은 키 목록까지
-> 요구한다 — 교집합에서 전부 사라진다. 표의 이 칸들은 **그렇게 되어야 한다**는 진술이지
-> 지금의 상태가 아니다. 어느 프로파일이 무엇을 주는지 정하는 것은
-> 정리가 아니라 보안 결정이므로, 요청자가 생기는 Phase(시크릿·프로세스는 4)
-> 착수 시점에 명시적으로 연다. [`architecture.md`](./architecture.md) §11-10.
+> `SecretsRead` · `JobManage`는 아직 주는 프로파일이 없다. 둘 다 어휘에는 있고 매니페스트에
+> 적을 수 있으며 — `secrets_read`는 파서가 비어 있지 않은 키 목록까지 요구한다 —
+> 교집합에서 전부 사라진다. 표의 그 칸들은 **그렇게 되어야 한다**는 진술이지 지금의 상태가
+> 아니다. 요청자가 생기는 Phase 착수 시점에 같은 방식으로 연다.
+> [`architecture.md`](./architecture.md) §11-10.
+
+> **⚠ 파괴적 명령 매처는 경계가 아니다.** `default.destructive`는 셸 명령을 문자열 목록
+> (`rm -rf` · `git push` · `sudo ` · `| sh` …)에 대고 부분 문자열로 맞춰 보고, 걸리면 사람에게
+> 묻는다. 적대적으로 쓴 명령은 빠져나간다 — `rm${IFS}-rf`는 `rm -rf`가 아니고, 어떤
+> 문자열 매칭도 그것을 고치지 못한다. 이 목록이 잡는 것은 **모델의 실수**다.
+>
+> 경계는 세 가지다: ① 셸을 받는 프로파일이 `developer`와 `ci` 둘뿐이고, ② 그 둘은 이미
+> 워크스페이스 쓰기 권한을 갖고 있으며(즉 셸이 늘리는 것이 없다), ③ 모든 argv가 세션
+> 로그에 남는다. 목록을 늘리는 것으로 ①을 대신할 수 없고, 정말로 셸을 빼고 싶다면 빼야
+> 하는 것은 도구가 아니라 그 프로파일의 `fs_write`다.
+> 이 한계를 못 박는 테스트가 `the_matcher_is_not_a_boundary`다 — 잡는 것과 **놓치는 것**을
+> 함께 단언한다.
 
 ---
 
@@ -436,6 +470,10 @@ rivet --profile readonly "왜 이 테스트가 실패하지?"
 - [ ] CI는 `--headless` + `ci` 프로파일
 - [ ] 서드파티 plugin은 Phase 6 이전에는 사용하지 않음
 - [ ] `sandbox.provider`가 실제 필요한 격리를 제공하는지 `guarantees()` 확인
+      (`rivet doctor`가 세 축을 그대로 출력한다. `local`은 셋 다 `no`다)
+- [ ] `[plugins."rivet.sandbox-local"] env_passthrough`에 비밀 이름이 없는지 확인
+- [ ] 호스트 프로세스가 `kill -9`로 죽으면 자식 프로세스 그룹이 남는다 — 런타임 코드로는
+      막을 수 없다. 감시자가 필요하면 프로세스 관리자 층에서 붙인다
 - [ ] `RunLimits`가 예산에 맞게 설정됨 (특히 `max_total_tokens`)
 - [ ] 세션 로그 보관 정책 수립 (프롬프트·출력에 민감정보 포함 가능)
 - [ ] 모델 provider에 무엇이 전송되는지 컨텍스트 감사

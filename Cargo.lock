@@ -1404,10 +1404,14 @@ dependencies = [
  "rivet-core",
  "rivet-model-openai",
  "rivet-plugin",
+ "rivet-policy-default",
  "rivet-runtime",
+ "rivet-sandbox-local",
  "rivet-session",
  "rivet-telemetry-log",
  "rivet-tool-filesystem",
+ "rivet-tool-git",
+ "rivet-tool-shell",
  "rivet-tui",
  "serde",
  "serde_json",
@@ -1503,9 +1507,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rivet-core",
+ "rivet-plugin",
+ "rivet-runtime",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1534,10 +1542,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rivet-core",
+ "rivet-plugin",
+ "rivet-runtime",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1591,9 +1604,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rivet-core",
+ "rivet-plugin",
+ "rivet-runtime",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1602,9 +1619,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rivet-core",
+ "rivet-plugin",
+ "rivet-runtime",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

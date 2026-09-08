@@ -77,8 +77,16 @@ pub enum SessionEvent {
         policy: String,
         reason: String,
     },
-    /// A human was asked to authorize something. Durable because "who approved `rm -rf`,
-    /// and when" is precisely the question an audit asks, and the bus is lossy.
+    /// This call went through an approval decision. Durable because "who approved
+    /// `rm -rf`, and when" is precisely the question an audit asks, and the bus is lossy.
+    ///
+    /// Not "a human was asked": the pair is written on every path through step 6,
+    /// including the ones nobody was asked on. Who answered is
+    /// [`SessionEvent::ApprovalResolved::actor`], and `None` there means a rule answered
+    /// rather than a person — an unattended run, a remembered grant, a cancellation.
+    /// Skipping the pair when nothing was asked would leave "the model asked for
+    /// something approvable and was refused" recoverable only by parsing the reason
+    /// string on `tool.blocked`, which is the one fact the audit came for.
     #[serde(rename = "approval.requested")]
     ApprovalRequested {
         run_id: RunId,

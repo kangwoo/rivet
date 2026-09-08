@@ -130,11 +130,14 @@ rivet plugin show rivet.tool-filesystem  # 매니페스트 + 프로파일 교집
 루프가 요청을 조립할 수 없기 때문이다. 적어도 되고, 안 적어도 항상 등록된다.
 
 `rivet.tool-shell`·`rivet.tool-git`·`rivet.policy-default`·`rivet.sandbox-local`은
-Phase 4에서 온다. 그때까지 여기 적으면 오타와 똑같이 실패한다 — 아무것도 등록하지 않는
-plugin을 끼워 넣는 것은 `rivet plugin list`에 거짓말을 하는 일이기 때문이다.
+**Phase 4부터 있고, 기본 선택에 들어 있다.**
 
 **`enabled`를 아예 쓰지 않거나 빈 목록으로 두면 "기본 선택"이다** — 에이전트를 돌리는 데
-필요한 것, 즉 `rivet.model-openai` · `rivet.tool-filesystem` · `rivet.context-builtin`.
+필요한 것, 즉 `rivet.model-openai` · `rivet.tool-filesystem` · `rivet.context-builtin` ·
+`rivet.policy-default` · `rivet.sandbox-local` · `rivet.tool-shell` · `rivet.tool-git`.
+정책 plugin이 기본에서 빠지면 기본 실행에 정책 체인이 없고, 샌드박스 plugin이 빠지면
+프로세스를 띄우는 호출만 실패한다. 셸과 git을 **누가 받는가**는 이 목록이 아니라
+프로파일이 정한다 — `production`에서는 셋 다 0개를 등록한다.
 `rivet.toml` 없이 `rivet "이 저장소 설명해줘"`가 도는 이유가 이것이다. 목록에 같은 id를
 두 번 적으면 한 번만 로드된다. 순서는 계약이 아니다 — 이름 충돌은 레지스트리가 거부하고
 interceptor는 priority로 정렬된다.
@@ -275,20 +278,35 @@ Phase 6의 프로세스 경계도 그대로 건너간다. 설정 파일이 `[plu
 profile = "developer"   # developer | readonly | reviewer | ci | production
 ```
 
-**Phase 1에서 프로파일이 하는 일은 에이전트의 도구 범위를 좁히는 것뿐이다.** 파이프라인
-2단계이지 정책 집행이 아니다. 정책 체인·승인·샌드박스는 Phase 4다.
+**프로파일은 두 가지를 한다.** 에이전트의 도구 범위를 좁히고(파이프라인 2단계), 정책
+체인이 호출마다 강제하는 grant를 계산한다. 두 번째가 Phase 4에서 생겼다.
 
-그래도 하는 일은 실재한다 — **등록되지 않은 도구는 모델에게 제시되지 않고, 제시되지 않은
-도구는 호출될 수 없다.** `readonly`는 모델이 `write_file`을 애초에 받지 못한다는 뜻이지,
-정책이 막아준다는 뜻은 아직 아니다.
+첫 번째만으로도 하는 일은 실재한다 — **등록되지 않은 도구는 모델에게 제시되지 않고,
+제시되지 않은 도구는 호출될 수 없다.** 두 번째가 답하는 것은 그 다음 질문이다: *다른*
+plugin이 같은 이름의 도구를 등록하면? 그때는 `default.grant`가 호출 시점에 막는다 —
+스스로 변이한다고 선언한 도구(`annotations.read_only == false`)는 `fs_write`가 없는 grant
+아래에서 돌지 않는다.
 
-| 프로파일 | 쓰기 도구 | 도구 범위 | provider 네트워크 | 무인 |
-|---|---|---|---|---|
-| `developer` | ○ | 전부 | ○ | |
-| `ci` | ○ | 전부 | ○ | ○ |
-| `readonly` | ✗ | 전부(쓰기 제외) | ○ | |
-| `production` | ✗ | 전부(쓰기 제외) | ○ | |
-| `reviewer` | ✗ | `read_file` `list_dir` `search` 만 | ○ | |
+| 프로파일 | 쓰기 도구 | 프로세스 | 도구 범위 | provider 네트워크 | 승인 | 무인 |
+|---|---|---|---|---|---|---|
+| `developer` | ○ | ○ (셸 · git 4) | 전부 | ○ | 파괴적 형태만 | |
+| `ci` | ○ | ○ (셸 · git 4) | 전부 | ○ | 불가 → 거부 | ○ |
+| `readonly` | ✗ | ○ (git 읽기 3) | 전부(쓰기 제외) | ○ | — | |
+| `production` | ✗ | ✗ | 전부(쓰기 제외) | ○ | **전부** | |
+| `reviewer` | ✗ | ○ (git 읽기 3) | `read_file` `list_dir` `search` `git_status` `git_diff` `git_log` 만 | ○ | — | |
+
+**`readonly`와 `reviewer`가 프로세스를 받는 것**은 권한 어휘에 "읽기 명령만"이 없기
+때문이다. 그 구분은 **도구가** 진다: `tool-git`은 읽기 셋을 `process_spawn`만으로 등록하고
+`git_commit`은 `fs_write`와 함께여야 등록하며, `tool-shell`은 둘 다 요구한다. 그래서 이 두
+프로파일이 실제로 받는 프로세스는 git 읽기 셋뿐이다.
+
+**승인 열**은 `rivet.policy-default`가 켜져 있을 때의 이야기다. `production`의 "전부"는
+그 plugin의 설정 키에서 오고, 운영자가 바꿀 수 있다:
+
+```toml
+[plugins."rivet.policy-default"]
+require_approval_for_all_in = ["production"]   # 기본값
+```
 
 Phase 2부터 프로파일의 권한 집합은 각 plugin의 매니페스트와 **실제로 교집합된다.**
 `readonly`에서 `rivet.tool-filesystem`의 `fs_write`가 사라지고, 그래서 `write_file`이
@@ -297,13 +315,19 @@ Phase 2부터 프로파일의 권한 집합은 각 plugin의 매니페스트와 
 
 **네트워크는 모든 프로파일이 준다.** 권한 어휘에 `NetworkHttp`가 하나뿐이고 모델
 plugin과 도구 plugin이 그것을 공유하므로, `readonly`에서 빼면 provider 호출까지 막혀
-어떤 프로파일로도 에이전트를 돌릴 수 없게 된다. 도구 egress를 따로 막는 것은 Phase 4
-샌드박스의 일이고, 지금은 아무것도 강제하지 않는다. `docs/security.md` §8 참고.
+어떤 프로파일로도 에이전트를 돌릴 수 없게 된다. 도구 egress를 따로 막을 수단은 Phase 4에도
+**없다** — `sandbox-local`은 `network_isolation: false`를 신고한다. `docs/security.md` §8
+참고.
 
-`ci`만 무인으로 친다. `production`을 무인으로 두면, Phase 4에서 승인이 붙는 순간 모든
-승인 대상을 **묻지 않고 자동 거부**하게 된다 — 보안 문서의 프로파일 표는 `production`을
-"전부 승인 필요" 칸에 두고 있으므로 그건 틀린 동작이다. CI에서는 `--headless`와 `ci`를
-같이 쓴다.
+`ci`만 프로파일 하나로 무인이 된다. `production`을 무인으로 두면 모든 승인 대상을
+**묻지 않고 자동 거부**하게 되고, 보안 문서의 표는 `production`을 "전부 승인 필요" 칸에
+두고 있으므로 그건 틀린 동작이다. CI에서는 `--headless`와 `ci`를 같이 쓴다.
+
+**`--headless`가 아니어도 무인이 될 수 있다.** 승인을 물을 곳이 없으면 무인이다: stdin이
+터미널이 아니면(`rivet … < /dev/null`, 파이프에 물린 실행) 프롬프트를 만들지 않고, 그러면
+승인 요구는 기다리는 대신 거부된다. 프롬프트를 만들었다면 절대 돌아오지 않는 read에서
+매달렸을 것이고, 그것이 `--headless`가 막으려던 바로 그 실패다. `rivet doctor`의
+`unattended` 줄이 최종 판정을 출력한다.
 
 **모르는 프로파일 이름은 시작할 때 실패한다.** 관대한 기본값으로 조용히 떨어지지 않는다.
 오타가 보안 사고가 되는 경로가 그것이다.
@@ -315,12 +339,42 @@ plugin과 도구 plugin이 그것을 공유하므로, `readonly`에서 빼면 pr
 
 | 섹션 | 언제 살아나는가 |
 |---|---|
-| `[sandbox]` | Phase 4 |
 | `[job]` | Phase 5 |
 | `[agents.<이름>]` | 이름 붙은 에이전트를 고를 CLI 표면이 아직 없다 |
 
+`[sandbox]`는 **Phase 4에서 이 표를 떠났다.** 아래를 볼 것.
+
 `[agents.reviewer]`의 `context_providers`가 부르는 `job`·`git` provider는 나중 단계에
-생긴다. Phase 1이 등록하는 건 `system`과 `workspace` 둘이다.
+생긴다. 오늘 등록되는 건 `system`과 `workspace` 둘이다. 다만 그 절이 적는 **도구** 이름은
+이제 전부 실재한다 — `--profile reviewer`가 `git_diff`와 `git_log`를 등록하고 `git_commit`은
+withhold한다.
+
+### `[sandbox]` — 프로세스가 무엇 아래에서 도는가
+
+```toml
+[sandbox]
+provider = "local"       # local | docker | podman
+```
+
+**호출마다 해석된다.** 이름이 아무 곳에도 등록되어 있지 않으면 **프로세스를 띄우는 호출만**
+실패하고, 나머지 도구는 그대로 돈다 — 실패는 찾지 못한 provider 이름을 말한다. 시작 시점의
+에러가 아닌 이유는 `--profile production`이다: 그 프로파일은 `process_spawn`을 주지 않아
+`sandbox-local`이 **의도적으로** 0개를 등록하고, 미등록을 시작 실패로 만들면 그 프로파일은
+어떤 설정으로도 뜨지 못한다. 같은 이유로 `enabled` 목록을 손으로 적어 둔 기존 설정도
+업그레이드만으로 깨지지 않는다.
+
+`rivet doctor`가 run 전에 같은 조회를 하고, **프로세스를 띄울 수 있는 plugin이 실제로
+로드되었는데** provider가 없을 때만 exit 2를 낸다.
+
+```toml
+[plugins."rivet.sandbox-local"]
+# 자식은 빈 환경에서 시작한다. 여기 적힌 이름 -- 값이 아니라 이름 -- 만 호스트 환경에서
+# 복사된다. 적지 않은 것은 새지 않는다.
+env_passthrough = ["PATH", "HOME", "LANG", "LC_ALL", "TZ"]   # 기본값
+```
+
+`local`은 아무것도 격리하지 않고 `guarantees()`가 그렇게 말한다. `rivet doctor`가 세 축을
+그대로 출력하므로 운영자가 자기가 무엇을 받고 있는지 오해하지 않는다.
 
 ---
 
@@ -358,8 +412,15 @@ telemetry plugin이 켜져 있는데 아무것도 안 보이면 "구조화 로�
 | 1 | 런 실패 또는 런타임 실패 |
 | 2 | 설정 문제 — 파일이 잘못됐거나, 프로파일이 없거나, 자격 증명이 없거나 |
 | 3 | 한도 발동 |
-| 4 | 정책 거부 (Phase 4부터 실제로 발생) |
+| 4 | 정책이 **run 자체**를 거절 — 아직 도달 불가능 (아래) |
 | 130 | 취소 — 관례대로 `128 + SIGINT` |
+
+**4는 Phase 4가 지나간 뒤에도 도달 불가능하다.** 정책이 *도구 호출*을 거부하는 것은 run을
+끝내지 않는다 — 거부는 도구 결과가 되고 모델이 그것을 읽고 적응한다. 그래야
+`rivet --profile readonly "delete all logs"`가 exit 4 대신 "그건 못 한다"는 답을 낸다.
+이 코드가 살아나는 것은 정책이 *run 자체*를 거절할 때(`StartRun`·`LoadPlugin` 액션)이고,
+그런 정책은 아직 없다. 스크립트가 "정책이 막았다"를 알고 싶으면 `--jsonl`의 `tool.blocked`을
+읽는다.
 
 ---
 
@@ -408,13 +469,17 @@ deny list
   probe keys/server.pem      blocked
 
 configured but not yet in force
-  [sandbox]   read, but no confinement is applied until Phase 4
   [job]      read, but the job runtime lands in Phase 5
   [agents.*]  reviewer declared; Phase 1 has no way to select one
 
 credentials
   the environment variable `OPENAI_API_KEY` is not set; it must hold the API key
   for `openai/gpt-4o-mini`. Set it, or point `api_key_env` at a different variable
+
+sandbox
+  provider    local (registered)
+  isolates    filesystem no · network no · processes no
+  may spawn   rivet.sandbox-local, rivet.tool-shell, rivet.tool-git
 ```
 
 **종료 코드로 판정한다** — 문제가 있으면 2로 끝나므로 CI에서 그대로 게이트로 쓸 수 있다.

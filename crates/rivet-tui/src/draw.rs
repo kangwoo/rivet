@@ -9,9 +9,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::state::{AppState, Panel, ToolStatus};
+use crate::state::{AppState, ApprovalView, Panel, ToolStatus};
 
 /// What the job panel says while there is nothing to show.
 ///
@@ -35,6 +35,63 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     draw_jobs(frame, panels[0], state);
     draw_agent(frame, panels[1], state);
     draw_status(frame, rows[1], state);
+    // Last, and over everything: an approval is the one thing on this screen the run is
+    // actually waiting on.
+    if let Some(pending) = &state.pending {
+        draw_approval(frame, area, pending);
+    }
+}
+
+/// The keys an approval prompt offers, in the order it lists them.
+///
+/// A named constant because a test asserts on it and because the three map onto the three
+/// [`rivet_core::policy::ApprovalOutcome`] variants a person can produce — `a` is offered
+/// only when the policy said the grant may be remembered.
+pub const APPROVAL_KEYS: &str = "[y] allow once   [a] allow for this session   [n] deny";
+
+/// The same, for a policy that did not offer to remember the grant.
+pub const APPROVAL_KEYS_ONCE: &str = "[y] allow once   [n] deny";
+
+/// The modal, centred over whatever was underneath.
+fn draw_approval(frame: &mut Frame<'_>, area: Rect, pending: &ApprovalView) {
+    let width = area.width.saturating_sub(4).clamp(20, 72);
+    let height = area.height.saturating_sub(4).clamp(5, 9);
+    let modal = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let keys = if pending.allow_remember {
+        APPROVAL_KEYS
+    } else {
+        APPROVAL_KEYS_ONCE
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            pending.reason.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(pending.preview.clone()),
+        Line::from(""),
+        Line::from(keys),
+    ];
+
+    // `Clear` first: the panels underneath have already been drawn into these cells.
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Approval required")
+                    .border_style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .wrap(Wrap { trim: true }),
+        modal,
+    );
 }
 
 fn panel_style(state: &AppState, panel: Panel) -> Style {

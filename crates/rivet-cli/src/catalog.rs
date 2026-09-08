@@ -16,9 +16,13 @@ use rivet_core::error::Error;
 use rivet_core::id::PluginId;
 use rivet_model_openai::OpenAiPlugin;
 use rivet_plugin::{PluginLoader, PluginSource};
+use rivet_policy_default::DefaultPolicyPlugin;
 use rivet_runtime::{BroadcastBus, Registry};
+use rivet_sandbox_local::LocalSandboxPlugin;
 use rivet_telemetry_log::TelemetryLogPlugin;
 use rivet_tool_filesystem::FilesystemPlugin;
+use rivet_tool_git::GitPlugin;
+use rivet_tool_shell::ShellPlugin;
 
 use crate::config::{Config, PluginSelection, Profile};
 
@@ -52,6 +56,26 @@ pub fn sources() -> Vec<PluginSource> {
             rivet_telemetry_log::MANIFEST_TOML,
             |manifest| Arc::new(TelemetryLogPlugin::new(manifest)),
         ),
+        PluginSource::builtin(
+            "rivet-policy-default",
+            rivet_policy_default::MANIFEST_TOML,
+            |manifest| Arc::new(DefaultPolicyPlugin::new(manifest)),
+        ),
+        PluginSource::builtin(
+            "rivet-sandbox-local",
+            rivet_sandbox_local::MANIFEST_TOML,
+            |manifest| Arc::new(LocalSandboxPlugin::new(manifest)),
+        ),
+        PluginSource::builtin(
+            "rivet-tool-shell",
+            rivet_tool_shell::MANIFEST_TOML,
+            |manifest| Arc::new(ShellPlugin::new(manifest)),
+        ),
+        PluginSource::builtin(
+            "rivet-tool-git",
+            rivet_tool_git::MANIFEST_TOML,
+            |manifest| Arc::new(GitPlugin::new(manifest)),
+        ),
     ]
 }
 
@@ -70,13 +94,32 @@ pub fn sources() -> Vec<PluginSource> {
 /// The distinction is not for one plugin: `docs/plan.md`'s MVP boundary table puts
 /// `telemetry(otel · prometheus)` in MVP+, so at least two more of the same shape are
 /// coming.
+///
+/// # Why the Phase 4 four are all in it
+///
+/// `policy-default` out of the default would mean a default run with **no policy chain**,
+/// which is Phase 4 not having happened. `sandbox-local` out of it would mean the default
+/// provider resolves to nothing — which blocks only the calls that start a process, but
+/// those are exactly the calls the other two plugins make. And `shell` and `git` are on
+/// `docs/plan.md`'s own MVP tool list.
+///
+/// What decides *who gets them* is the profile, not this list: `tool-shell` registers
+/// nothing without `fs_write`, `tool-git` registers its writing tool only with it, and
+/// `sandbox-local` registers nothing at all under `production`.
 #[must_use]
 pub fn default_selection() -> Vec<PluginId> {
-    ["rivet.model-openai", "rivet.tool-filesystem"]
-        .iter()
-        .map(|id| PluginId::new(*id).expect("a literal default-selection id is valid"))
-        .chain(std::iter::once(context_plugin_id()))
-        .collect()
+    [
+        "rivet.model-openai",
+        "rivet.tool-filesystem",
+        "rivet.policy-default",
+        "rivet.sandbox-local",
+        "rivet.tool-shell",
+        "rivet.tool-git",
+    ]
+    .iter()
+    .map(|id| PluginId::new(*id).expect("a literal default-selection id is valid"))
+    .chain(std::iter::once(context_plugin_id()))
+    .collect()
 }
 
 /// A registry with the configured plugins loaded, and the loader that owns them.
@@ -333,6 +376,93 @@ mod tests {
 
         let loader = inspect(config.profile).unwrap();
         select(&loader, &config.plugins).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    #[test]
+    fn the_profile_table_in_security_md_matches_the_code() {
+        // The five profiles against what `docs/security.md` §8 and the design's own table
+        // promise: write access, process access, and the tools that actually end up
+        // registered. The tool names come from each plugin's own `tools_for` applied to the
+        // effective grant the loader computed, which is exactly what `load` will do.
+        use rivet_core::capability::{FsScope, Permission};
+
+        const WRITABLE: [&str; 9] = [
+            "read_file",
+            "list_dir",
+            "search",
+            "write_file",
+            "shell",
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_commit",
+        ];
+        const READING: [&str; 6] = [
+            "read_file",
+            "list_dir",
+            "search",
+            "git_status",
+            "git_diff",
+            "git_log",
+        ];
+        const NO_PROCESS: [&str; 3] = ["read_file", "list_dir", "search"];
+
+        let expected: [(Profile, bool, bool, &[&str]); 5] = [
+            (Profile::Developer, true, true, &WRITABLE),
+            (Profile::Ci, true, true, &WRITABLE),
+            (Profile::ReadOnly, false, true, &READING),
+            (Profile::Reviewer, false, true, &READING),
+            (Profile::Production, false, false, &NO_PROCESS),
+        ];
+
+        for (profile, writes, spawns, tools) in expected {
+            let grant = profile.permissions();
+            assert_eq!(
+                grant.allows(&Permission::FsWrite(FsScope::Workspace)),
+                writes,
+                "{}: fs write",
+                profile.name()
+            );
+            assert_eq!(
+                grant.contains(&Permission::ProcessSpawn),
+                spawns,
+                "{}: process",
+                profile.name()
+            );
+
+            let loader = inspect(profile).unwrap();
+            let effective = |id: &str| {
+                loader
+                    .record(&PluginId::new(id).unwrap())
+                    .expect("in the catalog")
+                    .effective
+                    .clone()
+            };
+            let registered: Vec<String> = rivet_tool_filesystem::FilesystemPlugin::tools_for(
+                &effective("rivet.tool-filesystem"),
+            )
+            .into_iter()
+            .chain(rivet_tool_shell::ShellPlugin::tools_for(&effective(
+                "rivet.tool-shell",
+            )))
+            .chain(rivet_tool_git::GitPlugin::tools_for(&effective(
+                "rivet.tool-git",
+            )))
+            .map(|tool| tool.spec().name)
+            .collect();
+            assert_eq!(registered, tools, "{}: registered tools", profile.name());
+
+            // And the confinement: `production` grants no process, so the local provider
+            // registers nothing there -- which is why nothing in that row can spawn.
+            assert_eq!(
+                rivet_sandbox_local::LocalSandboxPlugin::provides(&effective(
+                    "rivet.sandbox-local"
+                )),
+                spawns,
+                "{}: sandbox provider",
+                profile.name()
+            );
+        }
     }
 
     #[test]

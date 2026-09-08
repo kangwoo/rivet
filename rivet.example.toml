@@ -23,16 +23,15 @@ max_consecutive_tool_errors = 5
 deny = [".env", ".git/config", ".ssh", "**/credentials.json", "**/*.pem"]
 
 # Since Phase 2 there is no middle category: an id here either loads or is a typo, and a
-# typo fails at startup listing the ids this build provides. `rivet.tool-shell`,
-# `rivet.tool-git`, `rivet.policy-default` and `rivet.sandbox-local` are therefore *not*
-# listed until Phase 4 ships them -- a plugin that registers nothing would only lie to
-# `rivet plugin list`.
+# typo fails at startup listing the ids this build provides.
 #
 # Leaving this key out (or empty) means the *default selection* -- what it takes to run an
 # agent -- which is what makes `rivet "explain this repo"` work with no configuration file
 # at all. It does not mean "every plugin this build provides": `rivet.telemetry-log` is in
 # the catalog and outside the default, because a log collector should not switch itself on
-# for somebody who never wrote a config.
+# for somebody who never wrote a config. The six below *are* the default selection, so this
+# list changes nothing; it is written out because a starting configuration that names what
+# it loads is easier to edit than one that does not.
 #
 # `rivet.context-builtin` (the system-prompt and workspace providers) is always registered:
 # the loop cannot assemble a request without it, so it is not an option to switch off.
@@ -43,6 +42,17 @@ deny = [".env", ".git/config", ".ssh", "**/credentials.json", "**/*.pem"]
 enabled = [
     "rivet.model-openai",
     "rivet.tool-filesystem",
+    # The policy chain. Without it a run has no policy at all: no workspace check on a
+    # path argument, no grant enforced at call time, no gate in front of `rm -rf`.
+    "rivet.policy-default",
+    # The confinement `[sandbox] provider` names below. Without it, tools that start a
+    # process are refused -- and only those; the file tools carry on.
+    "rivet.sandbox-local",
+    # Who actually gets these is the profile's decision, not this list's: `shell` needs
+    # both `process_spawn` and `fs_write`, so `readonly`, `reviewer` and `production`
+    # register none of it, and `git_commit` goes only to the writable profiles.
+    "rivet.tool-shell",
+    "rivet.tool-git",
     # Structured logs from the event bus, through `tracing`. In the catalog, out of the
     # default selection -- uncomment to switch it on. Note that this file only reaches
     # somebody who already has an explicit `enabled` list; what keeps it off for everyone
@@ -57,6 +67,27 @@ enabled = [
 base_url = "https://api.deepseek.com/v1"
 api_key_env = "DEEPSEEK_API_KEY"        # the key itself never goes in this file
 
+# [plugins."rivet.sandbox-local"]
+# Every child starts from an *empty* environment. These names -- names, not values -- are
+# copied in from the host's environment; anything not listed does not leak. Putting
+# `AWS_SECRET_ACCESS_KEY` in a child's environment means typing it here.
+#
+# `TERM` is deliberately not in the default: with it, tools emit ANSI escapes, and what
+# the model reads is meant to be text.
+# env_passthrough = ["PATH", "HOME", "LANG", "LC_ALL", "TZ"]
+
+# [plugins."rivet.policy-default"]
+# Profiles in which *every* tool call is put in front of a person.
+# require_approval_for_all_in = ["production"]
+#
+# Command fragments that put a shell call in front of a person. Replaces the built-in list
+# wholesale, so an empty list switches the gate off -- `rivet doctor` will not stop you.
+#
+# This list is **not a boundary**. A command written to get past substring matching gets
+# past it. What it catches is a model's mistake; what bounds a shell is which profiles are
+# handed one at all.
+# destructive_commands = ["rm -rf", "git push", "sudo ", "| sh"]
+
 # [plugins."rivet.telemetry-log"]
 # The prefixes to subscribe to. Omit for the default, which deliberately leaves out
 # `agent.text.` -- the model's output, verbatim.
@@ -69,15 +100,26 @@ api_key_env = "DEEPSEEK_API_KEY"        # the key itself never goes in this file
 # than quietly logging less than it was told to.
 # include_conversation = false
 
-# In Phase 1 a profile narrows the agent's *tool scope* -- which tools are registered and
-# therefore offered to the model. That is pipeline step 2, not policy enforcement: the
-# policy chain, approvals and sandboxing arrive in Phase 4. `readonly` really does mean the
-# model is never given `write_file`; it does not yet mean a policy would stop it.
+# A profile does two things. It narrows the agent's *tool scope* -- which tools are
+# registered and therefore offered to the model, which is pipeline step 2 -- and it computes
+# the grant the policy chain enforces on every call. So `readonly` means both that the model
+# is never given `write_file` and that a write would be refused if some other plugin
+# registered one.
+#
+#   developer   write, shell, git, approval only for destructive shapes
+#   ci          the same, unattended: an approval becomes a refusal rather than a wait
+#   readonly    no write; git's reading commands only
+#   reviewer    the same, narrowed again by the tool scope
+#   production  no write, no process at all, and every call needs a person
 [policy]
 profile = "developer"    # developer | readonly | reviewer | ci | production
 
 [sandbox]
 provider = "local"       # local | docker | podman
+# Resolved per call. If nothing registered this name, only the calls that actually start a
+# process fail -- the file tools carry on, and the failure names the provider it could not
+# find. `rivet doctor` runs the same lookup before a run and says so first.
+#
 # Check `guarantees()` output: `local` isolates nothing and says so.
 # The runtime always calls teardown(); a sandbox is never released by Drop alone.
 
@@ -89,10 +131,12 @@ max_concurrency = 1      # see architecture.md open question §11-5
 # A reviewer is a normal agent with a different model and no write tools.
 # A reviewer that can edit the code is not a reviewer.
 #
-# Phase 1 parses this section and reports it in `rivet doctor`, but has no command-line
+# This section is parsed and reported by `rivet doctor`, but there is still no command-line
 # surface for selecting a named agent, so nothing here takes effect yet. Note that
 # `context_providers` names a `job` and a `git` provider that do not exist until later
-# phases; Phase 1 registers `system` and `workspace`.
+# phases; today's build registers `system` and `workspace`. The tools it lists *are* all
+# real now: `--profile reviewer` registers `git_diff` and `git_log` and withholds
+# `git_commit`.
 [agents.reviewer]
 model             = "anthropic/claude-sonnet-5"
 tools             = ["read_file", "list_dir", "git_diff", "git_log"]

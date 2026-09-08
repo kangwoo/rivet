@@ -613,6 +613,42 @@ impl Harness {
         self.scoped.register_tool(tool).await.expect("tool");
     }
 
+    pub async fn register_policy(&self, policy: Arc<dyn rivet_core::policy::Policy>) {
+        use rivet_core::plugin::PluginRegistry;
+        self.scoped.register_policy(policy).await.expect("policy");
+    }
+
+    /// Register a policy and hand back whatever `register_policy` said.
+    ///
+    /// For the one case where the refusal *is* the assertion: the host keeps
+    /// `host.baseline` for its own seed decision.
+    pub async fn try_register_policy(
+        &self,
+        policy: Arc<dyn rivet_core::policy::Policy>,
+    ) -> rivet_core::Result<()> {
+        use rivet_core::plugin::PluginRegistry;
+        self.scoped.register_policy(policy).await
+    }
+
+    pub async fn register_interceptor(
+        &self,
+        interceptor: Arc<dyn rivet_core::plugin::Interceptor>,
+    ) {
+        use rivet_core::plugin::PluginRegistry;
+        self.scoped
+            .register_interceptor(interceptor)
+            .await
+            .expect("interceptor");
+    }
+
+    pub async fn register_sandbox(&self, sandbox: Arc<dyn rivet_core::sandbox::Sandbox>) {
+        use rivet_core::plugin::PluginRegistry;
+        self.scoped
+            .register_sandbox(sandbox)
+            .await
+            .expect("sandbox");
+    }
+
     pub async fn register_provider(&self, provider: Arc<dyn ContextProvider>) {
         use rivet_core::plugin::PluginRegistry;
         self.scoped
@@ -671,6 +707,202 @@ impl Harness {
                     .to_string()
             })
             .collect()
+    }
+}
+
+// --- policy, interceptor and approval doubles --------------------------------------------
+
+/// A policy that answers the same way every time.
+#[derive(Debug)]
+pub struct FixedPolicy {
+    name: String,
+    decision: rivet_core::policy::PolicyDecision,
+    /// How many times it was asked, so a test can prove the chain evaluates all of them.
+    pub asked: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FixedPolicy {
+    #[must_use]
+    pub fn new(name: &str, decision: rivet_core::policy::PolicyDecision) -> Self {
+        Self {
+            name: name.to_string(),
+            decision,
+            asked: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// A policy that denies with `reason`.
+    #[must_use]
+    pub fn denying(name: &str, reason: &str) -> Self {
+        Self::new(name, rivet_core::policy::PolicyDecision::deny(reason))
+    }
+
+    /// A policy that asks for approval, with the fields a session log will carry.
+    #[must_use]
+    pub fn asking(name: &str, scope_key: &str, allow_remember: bool) -> Self {
+        Self::new(
+            name,
+            rivet_core::policy::PolicyDecision {
+                outcome: rivet_core::policy::Outcome::RequireApproval {
+                    reason: "the test asked for one".into(),
+                    preview: format!("{scope_key} (preview)"),
+                    allow_remember,
+                    scope_key: scope_key.to_string(),
+                },
+                rewrite: None,
+                constraints: rivet_core::policy::ExecutionConstraints::default(),
+            },
+        )
+    }
+
+    /// A policy that allows but tightens a constraint.
+    #[must_use]
+    pub fn constraining(name: &str, constraints: rivet_core::policy::ExecutionConstraints) -> Self {
+        Self::new(
+            name,
+            rivet_core::policy::PolicyDecision::allow().with_constraints(constraints),
+        )
+    }
+}
+
+#[async_trait]
+impl rivet_core::policy::Policy for FixedPolicy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn evaluate(
+        &self,
+        _request: &rivet_core::policy::PolicyRequest,
+    ) -> rivet_core::Result<rivet_core::policy::PolicyDecision> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.decision.clone())
+    }
+}
+
+/// A policy that fails rather than deciding.
+#[derive(Debug)]
+pub struct BrokenPolicy(pub &'static str);
+
+#[async_trait]
+impl rivet_core::policy::Policy for BrokenPolicy {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    async fn evaluate(
+        &self,
+        _request: &rivet_core::policy::PolicyRequest,
+    ) -> rivet_core::Result<rivet_core::policy::PolicyDecision> {
+        Err(Error::internal("this policy is broken"))
+    }
+}
+
+/// An interceptor that sleeps before answering, or never answers at all.
+#[derive(Debug)]
+pub struct SlowInterceptor {
+    name: String,
+    delay: std::time::Duration,
+    answer: Option<rivet_core::policy::RestrictiveDecision>,
+}
+
+impl SlowInterceptor {
+    #[must_use]
+    pub fn new(name: &str, delay: std::time::Duration) -> Self {
+        Self {
+            name: name.to_string(),
+            delay,
+            answer: None,
+        }
+    }
+
+    #[must_use]
+    pub fn answering(mut self, answer: rivet_core::policy::RestrictiveDecision) -> Self {
+        self.answer = Some(answer);
+        self
+    }
+}
+
+#[async_trait]
+impl rivet_core::plugin::Interceptor for SlowInterceptor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn before_tool_call(
+        &self,
+        _request: &rivet_core::policy::PolicyRequest,
+    ) -> rivet_core::Result<Option<rivet_core::policy::RestrictiveDecision>> {
+        tokio::time::sleep(self.delay).await;
+        Ok(self.answer.clone())
+    }
+}
+
+/// An approval sink that answers from a script and records what it was asked.
+#[derive(Debug)]
+pub struct SpySink {
+    answers: Mutex<VecDeque<rivet_core::policy::ApprovalOutcome>>,
+    seen: std::sync::Mutex<Vec<rivet_core::policy::ApprovalRequest>>,
+}
+
+impl SpySink {
+    #[must_use]
+    pub fn answering(
+        answers: impl IntoIterator<Item = rivet_core::policy::ApprovalOutcome>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            answers: Mutex::new(answers.into_iter().collect()),
+            seen: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Every request it was handed, in order.
+    #[must_use]
+    pub fn asked(&self) -> Vec<rivet_core::policy::ApprovalRequest> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl rivet_core::policy::ApprovalSink for SpySink {
+    async fn request(
+        &self,
+        request: rivet_core::policy::ApprovalRequest,
+    ) -> rivet_core::Result<rivet_core::policy::ApprovalOutcome> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request);
+        Ok(self
+            .answers
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or(rivet_core::policy::ApprovalOutcome::Denied))
+    }
+}
+
+/// A sink that must never be reached.
+///
+/// The whole assertion for `--headless` and for a remembered grant: the sink is not
+/// consulted, and a spy that merely *counted* would let a test pass while the run hung
+/// waiting for it.
+#[derive(Debug)]
+pub struct ForbiddenSink;
+
+#[async_trait]
+impl rivet_core::policy::ApprovalSink for ForbiddenSink {
+    async fn request(
+        &self,
+        request: rivet_core::policy::ApprovalRequest,
+    ) -> rivet_core::Result<rivet_core::policy::ApprovalOutcome> {
+        panic!(
+            "nothing should have asked a human here: {} / {}",
+            request.reason, request.scope_key
+        );
     }
 }
 

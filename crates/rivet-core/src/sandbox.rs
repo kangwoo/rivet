@@ -29,6 +29,11 @@ pub struct ExecSpec {
     pub cwd: Option<PathBuf>,
     /// Environment. The sandbox starts from an empty environment and adds only these, so
     /// a leaked `AWS_SECRET_ACCESS_KEY` requires someone to have typed it.
+    ///
+    /// A provider may add names an operator listed for it — `sandbox-local` reads
+    /// `[plugins."rivet.sandbox-local"] env_passthrough`, a list of variable *names*
+    /// copied from the host environment. That table is where "someone has to have typed
+    /// it" actually happens; the values never appear in a config file or a log.
     pub env: BTreeMap<String, String>,
     pub stdin: Option<String>,
     pub timeout_ms: Option<u64>,

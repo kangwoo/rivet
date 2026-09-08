@@ -32,10 +32,15 @@ pub async fn run(config: &Config) -> rivet_core::Result<bool> {
     println!("  sessions    {}", config.sessions_dir.display());
     println!("  model       {}", config.model);
     println!(
-        "  profile     {} (narrows the agent's tool scope; policy enforcement is Phase 4)",
+        "  profile     {} (narrows the agent's tool scope, and computes the grant \
+         the policy chain enforces)",
         config.profile.name()
     );
-    println!("  unattended  {}", config.unattended);
+    println!(
+        "  unattended  {} (`--headless` or the `ci` profile; a non-terminal stdin also \
+         leaves nobody to ask)",
+        config.unattended
+    );
 
     println!("\nlimits");
     println!("  turns       {}", config.limits.max_turns);
@@ -65,11 +70,8 @@ pub async fn run(config: &Config) -> rivet_core::Result<bool> {
         }
     }
 
-    if config.inert.sandbox || config.inert.job || !config.inert.named_agents.is_empty() {
+    if config.inert.job || !config.inert.named_agents.is_empty() {
         println!("\nconfigured but not yet in force");
-        if config.inert.sandbox {
-            println!("  [sandbox]   read, but no confinement is applied until Phase 4");
-        }
         if config.inert.job {
             println!("  [job]      read, but the job runtime lands in Phase 5");
         }
@@ -96,6 +98,7 @@ pub async fn run(config: &Config) -> rivet_core::Result<bool> {
     // "a run began" and also "somebody ran doctor" would mean neither.
     let host = catalog::load(config, rivet_runtime::BroadcastBus::new()).await?;
     healthy &= report_plugins(config, &host);
+    healthy &= report_sandbox(config, &host).await;
     host.shutdown();
 
     println!("\ntools offered to the model");
@@ -106,6 +109,88 @@ pub async fn run(config: &Config) -> rivet_core::Result<bool> {
     }
 
     Ok(healthy)
+}
+
+/// The confinement processes will run under, and whether anything can start one.
+///
+/// # "Missing" is not the same as "wrong"
+///
+/// The provider name is *always* printed, because an operator asked for it. But
+/// `healthy = false` needs **both** of:
+///
+/// 1. a plugin that actually loaded still holds `process_spawn`, and
+/// 2. nothing is registered under the resolved provider name.
+///
+/// Condition 1 is what keeps this from being the same mistake as refusing at pipeline step
+/// 7. Without it, `--profile production` could never exit 0 — that profile grants no
+/// `process_spawn`, so `sandbox-local` registers nothing there **by design** — and any
+/// existing `rivet.toml` with a hand-written `enabled` list would go from exit 0 to exit 2
+/// on upgrade alone. Neither of those configurations can start a process, so neither of
+/// them is missing anything.
+///
+/// `instance_id.is_some()` is the whole of "actually loaded", and it is not decoration.
+/// `catalog::load` runs `validate()` over the **entire catalog**, and that is where
+/// `record.effective` is computed — so an unloaded `sandbox-local` still has
+/// `process_spawn` in its effective grant under `developer`. Counting records without the
+/// filter would make condition 1 true for every developer profile, including the ones with
+/// no process-capable plugin loaded at all. The same filter already appears a few lines
+/// below, for orphaned `[plugins."<id>"]` tables.
+///
+/// The material is `record.effective`, not a list of tool names. Asking "is `shell`
+/// registered" would put a specific plugin's tool names back into the host — the coupling
+/// Phase 2 removed, and the one `Config::api_key_env` is the last of.
+async fn report_sandbox(config: &Config, host: &catalog::Host) -> bool {
+    let registered = host.registry.sandbox(&config.sandbox_provider).await;
+    let can_spawn: Vec<&str> = host
+        .loader
+        .records()
+        .iter()
+        .filter(|record| record.instance_id.is_some())
+        .filter(|record| {
+            record
+                .effective
+                .contains(&rivet_core::capability::Permission::ProcessSpawn)
+        })
+        .map(|record| record.id.as_str())
+        .collect();
+
+    println!("\nsandbox");
+    println!(
+        "  provider    {} ({})",
+        config.sandbox_provider,
+        if registered.is_some() {
+            "registered"
+        } else {
+            "not registered by any loaded plugin"
+        }
+    );
+    if let Some(sandbox) = &registered {
+        let guarantees = sandbox.guarantees();
+        println!(
+            "  isolates    filesystem {} · network {} · processes {}",
+            yes_no(guarantees.filesystem_isolation),
+            yes_no(guarantees.network_isolation),
+            yes_no(guarantees.process_isolation)
+        );
+    }
+    if can_spawn.is_empty() {
+        println!("  no loaded plugin may start a process, so nothing needs one");
+        return true;
+    }
+    println!("  may spawn   {}", can_spawn.join(", "));
+    if registered.is_some() {
+        return true;
+    }
+    println!(
+        "  ! `{}` is not registered, so every process those plugins try to start \
+         will be refused",
+        config.sandbox_provider
+    );
+    false
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 /// One block per plugin: what it is, and what it actually put in the registry.
