@@ -22,11 +22,29 @@
 //! | Door | Who chose it | What makes it safe |
 //! |---|---|---|
 //! | [`Argv::flag`] | the tool | `&'static str` — a value read out of the model's JSON cannot be one |
-//! | [`Argv::option`] | the model | bound to the option before it, which consumes it verbatim |
+//! | [`Argv::option`] | the model | bound to a [`Consuming`] option, which takes the next entry verbatim |
 //! | [`Argv::operand`] | the model | **refused** when it could be read as an option |
 //! | [`Argv::pathspec`] | the model | after the `--` separator, which [`Argv`] emits, not the caller |
 //!
 //! There is no `push`. Adding an argument means picking a door, and every door is closed.
+//!
+//! # Why the option is a type and not a `&'static str`
+//!
+//! [`Argv::option`]'s safety is a fact about the *flag*, not about the value: it holds only
+//! while the flag really consumes the next argv entry. Taking a `&'static str` left that as
+//! something the author had to get right — `argv.option("--staged", model_value)` compiles,
+//! and puts a model-supplied string in argv free-standing.
+//!
+//! [`Consuming`] is that fact written down. Its field is private and its only values are the
+//! `const` items declared beside it, so a fourth option is an edit to *this* file — the one
+//! whose whole subject is this guard — rather than a line in a plugin. The same list is what
+//! [`option_exposure`] uses to decide whether a value is bound, which is why the walk in
+//! `tool-git`'s and `tool-shell`'s injection tests can now see that misuse: its binder rule
+//! stopped being a guess about anything beginning with `-` and became this list.
+//!
+//! Gluing the value on (`--flag=value`) is the other obvious answer, and it is not taken:
+//! it works for `--max-count` and `-m`, but `sh -c<command>` is not reliable across `/bin/sh`
+//! implementations, and this module has to hold for any program.
 //!
 //! # Why a leading `-` and not `--end-of-options`
 //!
@@ -38,6 +56,43 @@
 
 use rivet_core::error::{Capability, Error, ErrorKind};
 use rivet_core::sandbox::ExecSpec;
+
+/// An option that consumes the argv entry after it.
+///
+/// The closed set of flags [`Argv::option`] will bind a model-supplied value to. A private
+/// field is the whole mechanism: there is no way to name one that is not declared here, so
+/// "this flag takes a separate operand" is checked once, when the constant is written, rather
+/// than assumed at every call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Consuming(&'static str);
+
+impl Consuming {
+    /// `git commit -m <message>`.
+    pub const MESSAGE: Self = Self("-m");
+    /// `sh -c <command>`.
+    pub const COMMAND: Self = Self("-c");
+    /// `git log --max-count <n>`.
+    ///
+    /// The separate form, not `--max-count=<n>`: gluing consumes nothing, so what follows a
+    /// glued option is free-standing.
+    pub const MAX_COUNT: Self = Self("--max-count");
+
+    /// Every one of them, in one place, because [`option_exposure`] reads this list as its
+    /// binder rule. A constant added above and left out here would make the oracle blind to
+    /// exactly the argument it was added for, so they are declared together.
+    const ALL: [Self; 3] = [Self::MESSAGE, Self::COMMAND, Self::MAX_COUNT];
+
+    /// The flag as it reaches argv.
+    #[must_use]
+    pub fn flag(self) -> &'static str {
+        self.0
+    }
+
+    /// Whether `arg` is an option that consumes the entry after it.
+    fn binds(arg: &str) -> bool {
+        Self::ALL.iter().any(|consuming| consuming.0 == arg)
+    }
+}
 
 /// An argument list under construction.
 #[derive(Clone, Debug, Default)]
@@ -71,11 +126,10 @@ impl Argv {
     /// rather than an amend. The pairing is one call, so the binding cannot be broken by
     /// something being inserted between the two pushes.
     ///
-    /// The option must be one that actually takes a separate argument. If it is not, the
-    /// value becomes free-standing and the child rejects the whole invocation loudly — a
-    /// malformed command, not a quiet reinterpretation.
-    pub fn option(&mut self, flag: &'static str, value: &str) {
-        self.head.push(flag.to_string());
+    /// That the option consumes anything at all is [`Consuming`]'s job to know. A flag that
+    /// does not cannot be named here, so the value cannot come out free-standing.
+    pub fn option(&mut self, flag: Consuming, value: &str) {
+        self.head.push(flag.0.to_string());
         self.head.push(value.to_string());
     }
 
@@ -91,7 +145,12 @@ impl Argv {
     /// `tool.blocked`, so an attempt to reach outside the workspace is a durable fact rather
     /// than a tool result that scrolls away.
     pub fn operand(&mut self, what: &str, value: &str) -> rivet_core::Result<()> {
-        if looks_like_an_option(value) {
+        // Spelled out rather than calling [`looks_like_an_option`], which is what
+        // [`option_exposure`] uses. The guard and the oracle that checks built argument lists
+        // against it must be able to disagree: sharing one predicate meant a mutation of the
+        // guard blinded the oracle at the same moment, and the schema walk that is supposed
+        // to catch the mutation passed vacuously instead.
+        if value.starts_with('-') {
             return Err(Error::new(
                 ErrorKind::PolicyDenied,
                 Capability::Tool,
@@ -113,6 +172,16 @@ impl Argv {
     /// `-` is a filename, so nothing is refused here — a file really named `-rf` is still a
     /// file, and containment for the path itself is `fsguard`'s job, before this.
     pub fn pathspec(&mut self, path: &str) {
+        // An empty pathspec is dropped, not emitted. `git … -- ""` exits 128 with "empty
+        // string is not a valid pathspec. please use . instead if you meant to match all
+        // paths" — and `.` is the input that produces it, because a workspace-relative `.`
+        // strips to nothing, so a model that follows git's own advice loops. Emitting
+        // nothing means "everything", which is exactly what an empty pathspec meant. One
+        // guard at the single door rather than one at each call site is this module's own
+        // argument.
+        if path.is_empty() {
+            return;
+        }
         self.paths.push(path.to_string());
     }
 
@@ -167,13 +236,12 @@ pub fn option_exposure(args: &[String], value: &str) -> Option<usize> {
         return None;
     }
 
-    // Bound to the option before it, which consumes it verbatim. An option carrying its own
-    // value (`--max-count=20`) consumes nothing, so what follows it is free-standing.
-    if index > 0 {
-        let previous = &args[index - 1];
-        if previous.starts_with('-') && previous != "--" && !previous.contains('=') {
-            return None;
-        }
+    // Bound to the option before it, which consumes it verbatim. The rule is [`Consuming`]'s
+    // list, not a guess: "the previous token starts with `-`" is the assumption `option` used
+    // to make and could not enforce, and an oracle sharing it could not see the misuse — a
+    // value bound to a flag that consumes nothing would look shielded to both.
+    if index > 0 && Consuming::binds(&args[index - 1]) {
+        return None;
     }
     Some(index)
 }
@@ -215,7 +283,7 @@ mod tests {
         // refusing something that was never dangerous.
         let mut argv = Argv::new();
         argv.flag("commit");
-        argv.option("-m", "--amend --author=someone");
+        argv.option(Consuming::MESSAGE, "--amend --author=someone");
         let built = argv.into_args();
         assert_eq!(built, ["commit", "-m", "--amend --author=someone"]);
         assert_eq!(option_exposure(&built, "--amend --author=someone"), None);
@@ -271,6 +339,55 @@ mod tests {
             "--output=x".to_string(),
         ];
         assert_eq!(option_exposure(&after_equals, "--output=x"), Some(2));
+    }
+
+    #[test]
+    fn the_oracle_binds_to_the_declared_options_and_to_nothing_else() {
+        // The half that was a guess. Every `Consuming` shields what follows it --
+        for consuming in Consuming::ALL {
+            let built = [
+                "cmd".to_string(),
+                consuming.flag().to_string(),
+                "--output=x".to_string(),
+            ];
+            assert_eq!(
+                option_exposure(&built, "--output=x"),
+                None,
+                "`{}` consumes the entry after it",
+                consuming.flag()
+            );
+        }
+        // -- and an option-shaped flag that is *not* one does not, however much it looks
+        // like a binder. `--staged` takes no operand, so a value placed after it is
+        // free-standing and `git` reads it as an option. The old heuristic said `None`
+        // here, which is what made the schema walk blind to `option("--staged", …)`.
+        let misused = [
+            "diff".to_string(),
+            "--staged".to_string(),
+            "--output=x".to_string(),
+        ];
+        assert_eq!(option_exposure(&misused, "--output=x"), Some(2));
+    }
+
+    #[test]
+    fn an_empty_pathspec_is_left_out_rather_than_emitted() {
+        // `path: "."` resolves to the workspace root and strips to `""`. `git … -- ""` exits
+        // 128 telling the model to use `.`, which is what it wrote. Nothing at all means the
+        // same thing an empty pathspec meant: everything.
+        let mut argv = Argv::new();
+        argv.flag("diff");
+        argv.pathspec("");
+        assert_eq!(
+            argv.into_args(),
+            ["diff"],
+            "an empty pathspec takes the separator with it"
+        );
+
+        let mut with_a_real_one = Argv::new();
+        with_a_real_one.flag("log");
+        with_a_real_one.pathspec("");
+        with_a_real_one.pathspec("src");
+        assert_eq!(with_a_real_one.into_args(), ["log", "--", "src"]);
     }
 
     #[test]

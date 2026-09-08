@@ -32,6 +32,16 @@
 //! would then block on that same mutex — undoing with a lock exactly what the ownership
 //! bought.
 //!
+//! `prepare` is held to the same rule, and by the same mechanism: "a preparation is in
+//! flight" is a *state* rather than "the lock is held". Awaiting a provider under the mutex
+//! left the child covered and the preparation not — a tool abandoned during its first `exec`
+//! would leave the dispatcher's `teardown()` waiting on a `prepare` that takes no
+//! cancellation token. Nothing was broken, because `LocalSandbox::prepare` has no `await` in
+//! it at all; but the point of hoisting the `?` above the scope was that "teardown on every
+//! path" be a property of the shape rather than a fact about another module, and this was
+//! the one place the shape did not carry it. A scope sealed while a `prepare` is in flight tears the fresh
+//! handle down itself, so nothing is left running with nobody to stop it.
+//!
 //! After teardown the scope is **sealed**: a later `exec` fails instead of preparing a
 //! fresh handle. Under `local` a new child would die with the already-cancelled token
 //! anyway; under a container provider it would be one more container with nobody left to
@@ -50,6 +60,12 @@ use crate::registry::Registry;
 /// Where the scope's lazily prepared environment has got to.
 enum ScopeState {
     Idle,
+    /// A `prepare` is in flight, and the lock is *not* held while it runs.
+    ///
+    /// Two things need this to be a state. `teardown` must be able to seal the scope while a
+    /// provider is still preparing, and a second concurrent `exec` must wait rather than
+    /// prepare an environment of its own.
+    Preparing,
     Prepared(Arc<dyn SandboxHandle>),
     TornDown,
 }
@@ -60,6 +76,11 @@ pub struct SandboxScope {
     provider: Option<Arc<dyn Sandbox>>,
     request: SandboxRequest,
     state: Mutex<ScopeState>,
+    /// Woken every time the `Preparing` state is left, whichever way it is left.
+    ///
+    /// What a second concurrent `exec` waits on instead of the lock, so "prepare once"
+    /// survives the lock being released across the provider's `await`.
+    prepared: tokio::sync::Notify,
 }
 
 impl fmt::Debug for SandboxScope {
@@ -90,6 +111,7 @@ impl SandboxScope {
             provider,
             request,
             state: Mutex::new(ScopeState::Idle),
+            prepared: tokio::sync::Notify::new(),
         }
     }
 
@@ -101,6 +123,7 @@ impl SandboxScope {
             provider: None,
             request,
             state: Mutex::new(ScopeState::Idle),
+            prepared: tokio::sync::Notify::new(),
         }
     }
 
@@ -133,58 +156,121 @@ impl SandboxScope {
         spec: ExecSpec,
         cancel: CancellationToken,
     ) -> rivet_core::Result<ExecOutput> {
-        let handle = {
-            let mut state = self.state.lock().await;
-            match &*state {
-                ScopeState::TornDown => {
-                    return Err(Error::cancelled(
-                        "this call's sandbox has already been released; \
-                         refusing to start another process under it",
-                    ));
-                }
-                ScopeState::Prepared(handle) => handle.clone(),
-                ScopeState::Idle => {
-                    let Some(provider) = self.provider.as_ref() else {
-                        return Err(Error::new(
-                            ErrorKind::NotFound,
-                            Capability::Sandbox,
-                            match &self.name {
-                                Some(name) => format!(
-                                    "no sandbox provider named `{name}` is registered, and \
-                                     `{}` needs one to run a process",
-                                    spec.program
-                                ),
-                                None => format!(
-                                    "no sandbox provider is configured, and `{}` needs one \
-                                     to run a process",
-                                    spec.program
-                                ),
-                            },
-                        ));
-                    };
-                    let handle: Arc<dyn SandboxHandle> =
-                        Arc::from(provider.prepare(self.request.clone()).await?);
-                    *state = ScopeState::Prepared(handle.clone());
-                    handle
-                }
-            }
-        };
+        let handle = self.handle(&spec).await?;
         // The lock is gone before the child is waited on, so `teardown` can run while a
         // process is still going — which is the whole point of holding this from outside
         // the tool task.
         handle.exec(spec, cancel).await
     }
 
+    /// The prepared handle, preparing one on first use.
+    ///
+    /// The lock is held to read the state and to write it, never across the provider's
+    /// `await`. `spec` is here for the message a missing provider gets, and nothing else.
+    async fn handle(&self, spec: &ExecSpec) -> rivet_core::Result<Arc<dyn SandboxHandle>> {
+        loop {
+            // Registered *before* the state is read: a `notify_waiters` landing between the
+            // read and the wait would otherwise be a wakeup this task never sees.
+            let prepared = self.prepared.notified();
+            let next = {
+                let mut state = self.state.lock().await;
+                match &mut *state {
+                    ScopeState::TornDown => Next::Sealed,
+                    ScopeState::Prepared(handle) => return Ok(handle.clone()),
+                    ScopeState::Preparing => Next::Wait,
+                    idle @ ScopeState::Idle => match self.provider.clone() {
+                        Some(provider) => {
+                            *idle = ScopeState::Preparing;
+                            Next::Prepare(provider)
+                        }
+                        None => Next::Missing,
+                    },
+                }
+            };
+            match next {
+                Next::Prepare(provider) => return self.prepare(provider).await,
+                Next::Sealed => return Err(sealed()),
+                Next::Missing => return Err(self.missing(spec)),
+                Next::Wait => prepared.await,
+            }
+        }
+    }
+
+    /// Prepare the environment with the lock released, then publish the result.
+    ///
+    /// The caller left the scope in `Preparing`, so this owns the transition out of
+    /// it and every way out has to take it — the failing one back to `Idle`, so a later call
+    /// may try again rather than inherit a failure it did not cause.
+    async fn prepare(
+        &self,
+        provider: Arc<dyn Sandbox>,
+    ) -> rivet_core::Result<Arc<dyn SandboxHandle>> {
+        let prepared = provider.prepare(self.request.clone()).await;
+        let mut state = self.state.lock().await;
+        let sealed_meanwhile = matches!(*state, ScopeState::TornDown);
+        match prepared {
+            Ok(handle) if !sealed_meanwhile => {
+                let handle: Arc<dyn SandboxHandle> = Arc::from(handle);
+                *state = ScopeState::Prepared(handle.clone());
+                drop(state);
+                self.prepared.notify_waiters();
+                Ok(handle)
+            }
+            Ok(handle) => {
+                // `teardown` looked while this was in flight, found `Preparing`, had nothing
+                // to release and sealed the scope. Releasing what was just made is this
+                // task's job; leaving it would be the orphan this module exists to prevent.
+                drop(state);
+                self.prepared.notify_waiters();
+                if let Err(error) = handle.teardown().await {
+                    tracing::error!(%error, "a sandbox did not release cleanly");
+                }
+                Err(sealed())
+            }
+            Err(error) => {
+                if !sealed_meanwhile {
+                    *state = ScopeState::Idle;
+                }
+                drop(state);
+                self.prepared.notify_waiters();
+                Err(error)
+            }
+        }
+    }
+
+    /// The error a call gets when the decision named a provider nothing registered.
+    fn missing(&self, spec: &ExecSpec) -> Error {
+        Error::new(
+            ErrorKind::NotFound,
+            Capability::Sandbox,
+            match &self.name {
+                Some(name) => format!(
+                    "no sandbox provider named `{name}` is registered, and `{}` needs one to \
+                     run a process",
+                    spec.program
+                ),
+                None => format!(
+                    "no sandbox provider is configured, and `{}` needs one to run a process",
+                    spec.program
+                ),
+            },
+        )
+    }
+
     /// Release the environment, and seal the scope. Idempotent.
     ///
     /// Takes `&self` because an abandoned tool task still holds an `Arc` to this value, so
     /// the dispatcher cannot take ownership back to release it.
+    ///
+    /// A preparation still in flight is **not** waited for. The lock is free while a provider
+    /// prepares, so this seals the scope at once and the preparing task releases whatever it
+    /// ends up with; waiting instead would put back exactly the block this shape removes.
     pub async fn teardown(&self) {
         let prepared = {
             let mut state = self.state.lock().await;
             match std::mem::replace(&mut *state, ScopeState::TornDown) {
                 ScopeState::Prepared(handle) => Some(handle),
-                ScopeState::Idle | ScopeState::TornDown => None,
+                ScopeState::Idle | ScopeState::Preparing | ScopeState::TornDown => None,
             }
         };
         if let Some(handle) = prepared
@@ -193,6 +279,25 @@ impl SandboxScope {
             tracing::error!(%error, "a sandbox did not release cleanly");
         }
     }
+}
+
+/// What [`SandboxScope::handle`] found the state to be.
+///
+/// A value rather than acting inside the `match`, so the lock is released before anything
+/// that awaits.
+enum Next {
+    Prepare(Arc<dyn Sandbox>),
+    Wait,
+    Sealed,
+    Missing,
+}
+
+/// The refusal a released scope gives.
+fn sealed() -> Error {
+    Error::cancelled(
+        "this call's sandbox has already been released; \
+         refusing to start another process under it",
+    )
 }
 
 impl Drop for SandboxScope {
@@ -217,6 +322,7 @@ mod tests {
     use rivet_core::id::SandboxId;
     use rivet_core::workspace::Workspace;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     fn request() -> SandboxRequest {
         SandboxRequest {
@@ -302,7 +408,48 @@ mod tests {
         }
     }
 
+    /// A provider whose `prepare` parks until the test lets it through.
+    ///
+    /// `entered` is handed one permit the moment `prepare` is reached, so a test can tell
+    /// "in flight" from "not started yet" without sleeping; `gate` is what lets it finish.
+    #[derive(Debug)]
+    struct SlowToPrepare {
+        handle: Arc<CountingHandle>,
+        entered: Arc<tokio::sync::Semaphore>,
+        gate: Arc<tokio::sync::Semaphore>,
+        prepared: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Sandbox for SlowToPrepare {
+        fn name(&self) -> &'static str {
+            "slow"
+        }
+
+        fn guarantees(&self) -> rivet_core::sandbox::SandboxGuarantees {
+            rivet_core::sandbox::SandboxGuarantees::default()
+        }
+
+        async fn prepare(
+            &self,
+            _request: SandboxRequest,
+        ) -> rivet_core::Result<Box<dyn SandboxHandle>> {
+            self.entered.add_permits(1);
+            self.gate
+                .acquire()
+                .await
+                .expect("the gate outlives the preparation")
+                .forget();
+            self.prepared.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(CloneOf(self.handle.clone())))
+        }
+    }
+
     async fn registry_with(provider: Arc<CountingHandle>) -> Registry {
+        registry_holding(Arc::new(OneHandle(provider))).await
+    }
+
+    async fn registry_holding(provider: Arc<dyn Sandbox>) -> Registry {
         use rivet_core::plugin::PluginRegistry;
         let registry = Registry::new(crate::bus::BroadcastBus::new());
         let owner = crate::registry::Owner {
@@ -311,10 +458,19 @@ mod tests {
         };
         registry
             .scoped(owner)
-            .register_sandbox(Arc::new(OneHandle(provider)))
+            .register_sandbox(provider)
             .await
             .unwrap();
         registry
+    }
+
+    fn slow_provider(handle: &Arc<CountingHandle>) -> Arc<SlowToPrepare> {
+        Arc::new(SlowToPrepare {
+            handle: handle.clone(),
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            prepared: AtomicUsize::new(0),
+        })
     }
 
     #[tokio::test]
@@ -351,6 +507,91 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Cancelled);
 
         // Idempotent: a second teardown neither panics nor releases twice.
+        scope.teardown().await;
+        assert_eq!(counter.torn_down.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn teardown_does_not_wait_for_a_preparation_in_flight() {
+        // The claim the module makes about the child, made about `prepare` too. Awaiting a
+        // provider under `state`'s lock left the dispatcher's `teardown()` -- the one on
+        // every path out of steps 7 to 9 -- blocked on a call that has no cancellation token
+        // of its own.
+        let counter = Arc::new(CountingHandle::default());
+        let provider = slow_provider(&counter);
+        let registry = registry_holding(provider.clone()).await;
+        let scope = Arc::new(SandboxScope::resolve(&registry, Some("slow"), request()).await);
+
+        let running = {
+            let scope = scope.clone();
+            tokio::spawn(async move {
+                scope
+                    .exec(ExecSpec::new("sh", []), CancellationToken::new())
+                    .await
+            })
+        };
+        provider
+            .entered
+            .acquire()
+            .await
+            .expect("the preparation starts")
+            .forget();
+
+        tokio::time::timeout(Duration::from_secs(5), scope.teardown())
+            .await
+            .expect("teardown must not wait on a preparation it cannot cancel");
+
+        provider.gate.add_permits(1);
+        let error = running
+            .await
+            .expect("the task joins")
+            .expect_err("a scope sealed meanwhile starts no process");
+        assert_eq!(error.kind(), ErrorKind::Cancelled);
+        assert_eq!(
+            counter.torn_down.load(Ordering::SeqCst),
+            1,
+            "the environment finished after the seal is released, not orphaned"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_calls_racing_the_first_use_prepare_one_environment() {
+        // "Prepare once" used to be the mutex's doing, and the mutex is no longer held
+        // across the call. `Preparing` is what carries it now, and a second `exec` waits on
+        // that rather than making an environment of its own.
+        let counter = Arc::new(CountingHandle::default());
+        let provider = slow_provider(&counter);
+        let registry = registry_holding(provider.clone()).await;
+        let scope = Arc::new(SandboxScope::resolve(&registry, Some("slow"), request()).await);
+
+        let calls: Vec<_> = (0..2)
+            .map(|_| {
+                let scope = scope.clone();
+                tokio::spawn(async move {
+                    scope
+                        .exec(ExecSpec::new("sh", []), CancellationToken::new())
+                        .await
+                })
+            })
+            .collect();
+        provider
+            .entered
+            .acquire()
+            .await
+            .expect("one of them starts preparing")
+            .forget();
+        provider.gate.add_permits(1);
+
+        for call in calls {
+            call.await
+                .expect("the task joins")
+                .expect("both calls run under the one environment");
+        }
+        assert_eq!(
+            provider.prepared.load(Ordering::SeqCst),
+            1,
+            "a second environment nobody asked for is a second thing to tear down"
+        );
         scope.teardown().await;
         assert_eq!(counter.torn_down.load(Ordering::SeqCst), 1);
     }

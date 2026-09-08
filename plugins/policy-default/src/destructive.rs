@@ -5,8 +5,8 @@
 //!
 //! | Condition | Outcome | `scope_key` | remember? |
 //! |---|---|---|---|
-//! | the profile is in `require_approval_for_all_in` | approval | `<tool>` | yes |
 //! | a `shell` command matches a destructive shape | approval | `shell:<program>` | **no** |
+//! | the profile is in `require_approval_for_all_in` | approval | `<tool>` | yes |
 //! | any other `shell` call | allow | — | — |
 //! | `destructive` **and** no workspace-bound path argument | approval | `<tool>` | yes |
 //!
@@ -26,6 +26,24 @@
 //! the session. The program name is the unit a person approves and the unit a log counts
 //! by — and in this build the shell row never offers to remember anyway, so what the key is
 //! doing today is grouping the log.
+//!
+//! # Why the shell row is first, and why the profile row still says yes
+//!
+//! The order in the table is the order in the code, and the shell row moved to the top on
+//! purpose. The profile row's grant is rememberable, and its key is the *tool*; a `shell`
+//! call arriving under a listed profile would therefore have been answered with
+//! `scope_key = "shell"` and `allow_remember: true` — one `a` turning "never remembered"
+//! into a standing grant over the whole shell, which is exactly what the row below refuses
+//! to give. Asking the shape first means a destructive command is answered by the rule that
+//! is about it, whichever profile it arrives under, and an ordinary one still falls through
+//! to the profile rule and is asked about.
+//!
+//! With that closed, the profile row's `yes` is the right answer rather than a loose end.
+//! Its key is a tool, and a tool's reach is bounded by its own schema and by containment —
+//! `read_file` reads one declared path — so `a` there means "I have seen what this tool does
+//! under this profile", which is a thing an operator can mean and act on. The profile the
+//! setting defaults to, `production`, grants neither `process_spawn` nor `fs_write`, so
+//! nothing reachable under it has an open-ended reach to hand over in the first place.
 
 use async_trait::async_trait;
 use rivet_core::policy::{Outcome, PolicyAction, PolicyDecision, PolicyRequest};
@@ -101,26 +119,13 @@ impl rivet_core::policy::Policy for DestructivePolicy {
             return Ok(PolicyDecision::allow());
         };
 
-        // 1. The profile asks about everything.
-        if self
-            .settings
-            .require_approval_for_all_in
-            .iter()
-            .any(|profile| profile == &request.profile)
+        // 1. A shell command matching a destructive shape. Before the profile rule, which
+        //    is rememberable and keyed by the tool: this call reaching that rule instead
+        //    would let one `a` hand out the standing grant this one refuses to give.
+        let command = shell_command(call);
+        if let Some((command, shape)) =
+            command.and_then(|command| Some((command, self.matched_shape(command)?)))
         {
-            return Ok(approval(
-                format!("the `{}` profile approves every call", request.profile),
-                preview(call),
-                true,
-                call.name.clone(),
-            ));
-        }
-
-        // 2 and 3. A shell command, matched against the shapes.
-        if let Some(command) = shell_command(call) {
-            let Some(shape) = self.matched_shape(command) else {
-                return Ok(PolicyDecision::allow());
-            };
             return Ok(approval(
                 format!("the command matches the destructive shape `{shape}`"),
                 command.to_string(),
@@ -130,6 +135,32 @@ impl rivet_core::policy::Policy for DestructivePolicy {
                 false,
                 format!("shell:{}", program_of(command)),
             ));
+        }
+
+        // 2. The profile asks about everything.
+        if self
+            .settings
+            .require_approval_for_all_in
+            .iter()
+            .any(|profile| profile == &request.profile)
+        {
+            return Ok(approval(
+                format!("the `{}` profile approves every call", request.profile),
+                preview(call),
+                // Rememberable, deliberately. The key is the *tool*, and a tool's reach is
+                // bounded by its own schema and by containment, so `a` here says "I have
+                // seen what this tool does under this profile" -- something an operator can
+                // mean. The one grant that would be too wide to give this way is the shell,
+                // and rule 1 above has already taken every call that would deserve the
+                // stronger answer. See the module documentation.
+                true,
+                call.name.clone(),
+            ));
+        }
+
+        // 3. Any other shell call.
+        if command.is_some() {
+            return Ok(PolicyDecision::allow());
         }
 
         // 4. A self-declared destructive tool whose reach containment has not already
@@ -366,6 +397,68 @@ mod tests {
             .unwrap();
         match decision.outcome {
             Outcome::RequireApproval { scope_key, .. } => assert_eq!(scope_key, "read_file"),
+            other => panic!("expected an approval, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_profile_that_approves_everything_cannot_remember_a_shell_gate() {
+        // Rule 2 hands out a tool-wide grant on `a`, which is the right unit for a tool
+        // whose schema bounds its reach. `shell` is not one. An operator who lists a profile
+        // that has a shell would otherwise turn "the shell gate is never rememberable" into
+        // "rememberable after one `a`", because rule 2 answers with the tool name as the key
+        // and rule 3's refusal never runs.
+        let everything_in_developer = DestructivePolicy::new(Settings {
+            require_approval_for_all_in: vec!["developer".to_string()],
+            ..Settings::default()
+        });
+        let gated = everything_in_developer
+            .evaluate(&request_in_profile(
+                "developer",
+                "shell",
+                shell("rm -rf build"),
+                annotated(false, true),
+            ))
+            .await
+            .unwrap();
+        match gated.outcome {
+            Outcome::RequireApproval {
+                allow_remember,
+                scope_key,
+                ..
+            } => {
+                assert!(
+                    !allow_remember,
+                    "the profile rule must not hand out what the shell rule refuses"
+                );
+                assert_eq!(scope_key, "shell:rm", "and it is the shell rule answering");
+            }
+            other => panic!("expected an approval, got {other:?}"),
+        }
+
+        // Narrowed, not skipped: an ordinary command under the same profile is still asked
+        // about, which is what listing the profile meant.
+        let ordinary = everything_in_developer
+            .evaluate(&request_in_profile(
+                "developer",
+                "shell",
+                shell("cargo test"),
+                annotated(false, true),
+            ))
+            .await
+            .unwrap();
+        match ordinary.outcome {
+            Outcome::RequireApproval {
+                allow_remember,
+                scope_key,
+                ..
+            } => {
+                assert!(
+                    allow_remember,
+                    "a tool-level grant is one a person may keep"
+                );
+                assert_eq!(scope_key, "shell");
+            }
             other => panic!("expected an approval, got {other:?}"),
         }
     }

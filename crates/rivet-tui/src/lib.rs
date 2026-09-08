@@ -28,6 +28,13 @@
 //! that somewhere, and it is a `rivet-core` contract — so the rule that actually protects
 //! this crate's independence, "no import outside `rivet-core`", is untouched.
 //!
+//! A round trip has a second consequence the one-way path never had: **the sink outlives the
+//! screen**. `q` ends the drawing and lets the run continue, and the host still holds this
+//! `Tui` as its `approval_sink`. So the screen carries a dismissal — see [`app::Tui::dismiss`]
+//! — and a dismissed screen refuses instead of asking, which the runtime already reads as a
+//! refusal. Without it a question would be asked of a terminal nobody is drawing to, and the
+//! run would wait out its whole deadline for an answer no key could give.
+//!
 //! The corollary is that the job panel is built now, in a phase with no job runtime. Its
 //! producer arrives in Phase 5; leaving the panel out until then would leave Phase 5
 //! holding an empty panel and a tempting `rivet-job` dependency.

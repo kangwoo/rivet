@@ -5,6 +5,12 @@
 //! was written rather than about what it is. A second string argument added later — an
 //! `interpreter`, a `stdin_file` — would be safe only if whoever added it happened to pick
 //! the right door. This test is what makes that not a matter of happening to.
+//!
+//! The walk's reach is `ExecSpec::args`, and only that. An argument routed through `cwd`,
+//! `env` or `stdin` never becomes an argv entry, so this test passes for it vacuously —
+//! which is the right answer for `cwd`, whose containment is `fsguard`'s and is proven in
+//! `sandbox-local/tests/cwd.rs`, but is worth saying rather than leaving a reader to infer
+//! that argv is the only way out.
 
 use std::sync::{Arc, Mutex};
 
@@ -76,13 +82,21 @@ async fn no_declared_argument_can_become_an_option() {
     let properties = spec.input_schema["properties"]
         .as_object()
         .expect("a declared object schema");
-    let strings: Vec<&String> = properties
-        .iter()
-        .filter(|(_, schema)| schema["type"] == "string")
-        .map(|(key, _)| key)
-        .collect();
 
-    for key in &strings {
+    for (key, schema) in properties {
+        let declared_type = schema["type"].as_str().unwrap_or("");
+        // Excluding what cannot carry a string rather than naming what can: an argument
+        // declared later as an array of strings reaches argv the same way a plain one does,
+        // and a filter written the other way round would skip it in silence.
+        if matches!(declared_type, "boolean" | "integer" | "number") {
+            continue;
+        }
+        let injected = if declared_type == "array" {
+            serde_json::json!([INJECTED])
+        } else {
+            serde_json::json!(INJECTED)
+        };
+
         let host = Arc::new(SpyHost {
             seen: Mutex::new(Vec::new()),
         });
@@ -90,7 +104,7 @@ async fn no_declared_argument_can_become_an_option() {
         // `command` is required, so it is always present; the key under test overwrites it
         // when that key *is* `command`.
         input.insert("command".to_string(), serde_json::json!("true"));
-        input.insert((*key).clone(), serde_json::json!(INJECTED));
+        input.insert(key.clone(), injected);
 
         let outcome = Shell
             .execute(ctx(host.clone()), serde_json::Value::Object(input))
@@ -116,12 +130,14 @@ async fn no_declared_argument_can_become_an_option() {
         }
     }
 
-    let mut found: Vec<&str> = strings.iter().map(|k| k.as_str()).collect();
-    found.sort_unstable();
+    // Every declared property, of every type, so an argument of any shape makes somebody
+    // look at this file once -- including the ones the walk above deliberately skips.
+    let mut declared: Vec<&str> = properties.keys().map(String::as_str).collect();
+    declared.sort_unstable();
     assert_eq!(
-        found,
-        ["command", "cwd"],
-        "the schema walk found a different set of string arguments than `shell` declares"
+        declared,
+        ["command", "cwd", "timeout_ms"],
+        "the schema walk found a different set of arguments than `shell` declares"
     );
 }
 

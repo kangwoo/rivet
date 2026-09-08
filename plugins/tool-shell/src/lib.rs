@@ -18,9 +18,11 @@
 //! that is not decoration. `-c` consumes the next argv entry verbatim, which is exactly why
 //! a command beginning with `-` is a command rather than an option — but "this value is
 //! bound to that option" is a fact about *two* pushes, and two pushes can drift apart.
-//! `Argv::option` makes it one call. The other reason is that `Argv` has no `push`: a second
-//! argument added here later cannot land free-standing without someone choosing a door, and
-//! `tool-git`'s `rev` is what happens when that choice is available to skip.
+//! `Argv::option` makes it one call, and it takes a [`rivet_runtime::argv::Consuming`]
+//! rather than any string, so "the option really does swallow what follows" is checked where
+//! that constant is declared instead of here. The other reason is that `Argv` has no `push`: a second argument added here later
+//! cannot land free-standing without someone choosing a door, and `tool-git`'s `rev` is what
+//! happens when that choice is available to skip.
 //!
 //! # Who gets a shell
 //!
@@ -37,7 +39,7 @@ use async_trait::async_trait;
 use rivet_core::capability::{FsScope, Permission, PermissionSet};
 use rivet_core::plugin::{Plugin, PluginContext, PluginHandle, PluginManifest};
 use rivet_core::tool::{Tool, ToolAnnotations, ToolContext, ToolResult, ToolSpec};
-use rivet_runtime::argv::Argv;
+use rivet_runtime::argv::{Argv, Consuming};
 
 /// The plugin id this crate registers under.
 pub const PLUGIN_ID: &str = "rivet.tool-shell";
@@ -112,7 +114,7 @@ impl Tool for Shell {
         // whatever it starts with, and there is no door in `Argv` that would let this land
         // free-standing instead.
         let mut argv = Argv::new();
-        argv.option("-c", command);
+        argv.option(Consuming::COMMAND, command);
         let mut spec = argv.into_exec("sh");
         spec.cwd = input
             .get("cwd")

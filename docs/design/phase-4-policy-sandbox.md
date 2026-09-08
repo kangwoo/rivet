@@ -1590,3 +1590,104 @@ requested 쪽도 단언하도록, 패닉 경로의 teardown 테스트 둘, 그�
 바뀌었다** — "Phase 2의 범위 밖"에서 "요청자가 없다"로. §11-15(`Plugin::load` 데드라인)는
 그대로 열려 있고, 왜 같은 모양을 재사용하지 않았는지는 §5의 "알려진 미해결"과 §11-15 자신에
 적혀 있다.
+
+### 8.7 PR 리뷰 1라운드 (`f5933b8` 위)
+
+PR #5에 붙은 독립 리뷰가 blocking 하나와 non-blocking 여덟(빌드 리뷰 2가 넘긴 여섯 + 리뷰어
+자신의 둘)을 냈다. 전부 반영했다.
+
+**blocking — 승인 sink가 화면보다 오래 산다.** `--tui`에서 `q`는 `Reaction::StopDrawing`이고,
+이것은 렌더 루프를 끝내되 **런은 계속하게 둔다**(`quitting_leaves_the_ui_without_stopping_the_run`이
+그 성질을 못 박는다). 그런데 `cfg.approval_sink`는 여전히 같은 `Arc<Tui>`를 쥐고 있었다.
+렌더 루프가 없으면 키 경로가 없고, 키 경로가 없으면 `answer_approval`에 도달할 방법이 없다.
+그래서 `q` 뒤에 승인이 필요한 호출이 하나라도 나오면 — `developer`의 `git_commit`(경로 인자가
+없어 4번 규칙에 걸린다), 파괴적 형태에 걸리는 셸 명령 — `Tui::request`의 `receiver.await`에서
+**`max_duration_ms`(기본 30분)** 동안 아무것도 그리지 않은 채 멈춘다. Ctrl-C로 회복되므로
+교착은 아니지만, `--headless`와 `render/approve.rs`가 각자 막으려던 바로 그 실패이고 셋째
+문으로 들어온 것이다. 두 기존 장치는 **런 시작 시점의** 상태만 본다.
+
+고친 방식: "화면이 없다"를 sink가 아는 **상태**로 만들었다. `Tui`가 `dismissed:
+CancellationToken`을 들고, `Tui::dismiss()`가 그리기를 끝내는 것과 sink를 닫는 것을 **한 사실**로
+묶는다. `request`는 들어갈 때 확인하고(이미 사라진 화면에 질문을 올리지 않는다) 기다리는
+동안에도 함께 경주한다(`q`가 도착했을 때 이미 화면에 있던 프롬프트도 풀린다). 반환은
+`Err`이고 `Approvals::decide`가 이미 sink의 `Err`를 `Denied`로 접으므로 — 닫히는 방향이고
+`--headless`와 같은 답이다 — 하류는 바꿀 것이 없다.
+
+토큰을 하나로 만든 것이 요점이다. `render_loop`는 넘겨받은 토큰이 아니라 화면 자신의 것을
+보고, `Screen`은 `stop` 토큰 대신 `Arc<Tui>`를 들며, `Screen::stop`·`Screen::drop`·
+`Reaction::StopDrawing` 셋 다 `dismiss()`를 부른다. `drive`는 **자기가 끝나는 모든 경로에서**
+(터미널이 죽어 `?`로 나가는 것 포함) `Dismissal` 가드로 dismiss한다. 그래서 "화면이 없으면
+sink도 없다"가 루프의 성질이지 루프를 시작한 사람이 기억해야 하는 규칙이 아니다. 그리고
+sink 자체를 `Screen::start` **뒤에서** 만들어, 화면이 시작되지 못한 경우에는 `--tui`도 sink를
+갖지 않는다.
+
+테스트 넷: `a_dismissed_screen_is_not_a_sink` ·
+`dismissing_releases_an_approval_that_was_already_waiting` ·
+`a_render_loop_that_ends_on_its_own_stops_being_a_sink` ·
+`quitting_also_stops_the_screen_from_answering_approvals`(호스트 쪽 배선). 앞의 둘은
+`tokio::time::timeout` 안에서 돈다 — 회귀는 *멈춤*이므로, 상한이 없으면 실패하는 대신 스위트를
+매달리게 한다. 수정 전 코드로 되돌려 확인했다: 호스트 쪽 배선을 빼면 CLI 테스트가 실패하고,
+sink 쪽 확인을 빼면 TUI 스위트가 매달린다.
+
+**non-blocking 여덟.**
+
+1. `argv.rs:77` + `argv.rs:174` — 리뷰어 말대로 **한 편집으로** 닫았다. `Argv::option`의
+   플래그가 `&'static str`이 아니라 `Consuming`(비공개 필드, `argv.rs`에 선언된 `const` 셋)이
+   되어, "이 옵션이 뒤 항목을 실제로 삼킨다"가 호출 지점의 판단이 아니라 타입의 사실이 됐다.
+   같은 목록을 `option_exposure`가 binder 규칙으로 쓰므로, 스키마를 훑는 일반 순회가
+   `option("--staged", 모델값)` 오용을 **이제 볼 수 있다**(`the_oracle_binds_to_the_declared_options_and_to_nothing_else`가
+   양쪽을 단언한다). 값 붙임(`--flag=value`)은 택하지 않았다 — `sh -c<command>`가 `/bin/sh`
+   구현마다 보장되지 않고 이 모듈은 어떤 프로그램에 대해서도 성립해야 한다. 공유 술어의
+   나머지 절반은 `operand`가 `value.starts_with('-')`를 **직접** 쓰게 해서 닫았다: 가드를
+   변이시켜도 oracle이 함께 멀지 않는다.
+2. `tool-git`·`tool-shell`의 순회가 `type == "string"`만 걸렀다 — 문자열을 **담을 수 없는**
+   셋(`boolean`·`integer`·`number`)만 제외하도록 뒤집고, `array`에는 한 원소 배열을 먹이며,
+   마지막 단언을 **선언된 전체 이름 집합**으로 넓혔다. 어떤 타입의 인자가 새로 생겨도 이
+   파일을 한 번은 보게 된다.
+3. `tool-git/src/tools.rs:107` — `path: "."`가 빈 pathspec을 만들어 `git`이 exit 128로
+   "empty string is not a valid pathspec. please use . instead"라고 답한다. 그 안내가 가리키는
+   입력이 방금 실패를 만든 그 입력이라 모델이 루프에 빠진다. 두 호출 지점이 아니라
+   `Argv::pathspec` 한 문에서 빈 문자열을 버린다 — 빈 pathspec은 "전부"이고 아무것도
+   내보내지 않는 것과 같은 뜻이다.
+4. `dispatch.rs:563` — 도구가 **자기 안에서** 올린 `PolicyDenied`가 감사 로그에
+   `policy: "workspace"`로 남았다. `default.workspace`는 그 호출을 평가한 적이 없다. 리뷰어의
+   (a)안을 택해 `WORKSPACE_POLICY` → `TOOL_POLICY = "tool"`("도구 자신의 봉쇄가 거절했다")로
+   바꿨다 — §3.2와 §6.0이 `WORKSPACE_POLICY`라는 이름으로 부르는 상수가 이것이고, 남긴다는
+   결정은 그대로이며 바뀐 것은 그 상수가 담는 **문자열**뿐이다.
+   `a_refusal_the_tool_raised_is_filed_under_the_tool_and_not_a_policy`가 리터럴로 못 박는다. 함께: 호스트가 쓰는 정책 이름 셋(`host.baseline` · `agent.scope` · `tool`)을
+   `HOST_POLICY_NAMES`로 모아 `register_policy`가 전부 예약한다 — 전에는 `host.baseline`
+   하나뿐이었다.
+5. `app.rs:257-263` — `state.pending`과 `self.answer`를 순차로 잡던 두 뮤텍스를, `request`와
+   `answer_approval` 양쪽에서 **함께, 같은 순서로**(`state` → `answer`) 잡는다. blocking과
+   같은 impl에 있으므로 같은 패스에서 고쳤다.
+6. `sandbox_scope.rs:166`(리뷰어 자신의 발견) — `provider.prepare()`를 `self.state` 락을 쥔 채
+   await했고 `teardown()`이 같은 락을 잡는다. 자식에 대해서는 성립하던 모듈의 중심 주장이
+   prepare에 대해서는 성립하지 않았다. `Preparing` 상태를 넣어 락을 놓고 준비하고 다시 잡아
+   `TornDown`을 재확인한다 — 그 사이에 봉인됐으면 방금 만든 핸들을 **스스로 teardown**한다.
+   동시 `exec` 둘이 환경 둘을 만들지 않도록 `Notify`로 기다린다. 오늘 깨지는 것은 없었지만
+   (`LocalSandbox::prepare`에 await가 없다) "모든 경로에서 teardown"이 다른 모듈에 대한
+   사실이 아니라 모양의 성질이어야 한다는 것이 이 설계의 논지였다.
+   `teardown_does_not_wait_for_a_preparation_in_flight`가 붙들고, 락을 다시 쥐게 되돌리면
+   5초 타임아웃으로 실패하는 것을 확인했다.
+7. `destructive.rs:114`(리뷰어 자신의 발견, 판단 요청) — **`true`가 맞다고 판단했고, 그 이유를
+   `true` 옆에 적었다.** 기억되는 단위가 *도구*이고 도구의 도달 범위는 자기 스키마와 봉쇄가
+   정하므로 `a`는 사람이 한 번 보고 뜻할 수 있는 말이다. 기본값 `production`은
+   `process_spawn`도 `fs_write`도 주지 않으므로 그 아래에서 닿는 것 중 열린 도달 범위를 가진
+   것이 없다. **다만 하나를 닫았다**: 셸 형태 규칙을 프로파일 규칙 **앞으로** 옮겼다. 전에는
+   `require_approval_for_all_in`에 셸을 가진 프로파일을 넣는 것만으로, 파괴적 셸 명령이
+   `scope_key = "shell"` · `allow_remember: true`로 답해져 "셸 게이트는 절대 기억되지 않는다"가
+   한 번의 `a`로 뒤집혔다. 이제 그런 호출은 언제나 셸 규칙이 답한다
+   (`a_profile_that_approves_everything_cannot_remember_a_shell_gate`).
+8. 리뷰어가 확인해 준 사실 하나는 코드 변경이 아니다. **ubuntu CI가 이 커밋에서 이미
+   초록이다** — run `34199445217`(head `f5933b8`)이 `ubuntu-latest`에서 fmt · clippy ·
+   `cargo test --workspace --all-features` · `RUSTDOCFLAGS="-D warnings" cargo doc`를 돌리고,
+   MSRV 1.90 `cargo check`와 `cargo audit`도 함께 돈다. 즉 §6.4가 요구한 "CI(ubuntu)와 개발
+   머신(darwin) 양쪽"은 **충족돼 있고**, 타이밍에 의존하는 셋도 리눅스에서 돌았다. 저장소
+   안에는 이와 어긋나는 문장이 없다(§6.4의 문장은 요구사항이지 측정 결과의 주장이 아니다).
+
+게이트 재측정: `cargo fmt --all -- --check` 차이 없음 · `cargo clippy --workspace
+--all-targets -- -D warnings` 경고 0 · `cargo test --workspace` **772 passed · 0 failed ·
+1 ignored**(기준선 760에서 +12; 사라진 테스트 없음 — 이름 집합을 비교했고 유일한 차이는
+`no_registered_policy_may_claim_the_baseline_name`이 셋을 다 도는
+`no_registered_policy_may_claim_a_name_the_host_writes`로 이름이 바뀐 것이다) ·
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` 경고 0.
