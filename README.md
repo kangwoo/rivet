@@ -13,10 +13,10 @@ Plugin · Model · Tool · ContextProvider · Policy · Sandbox
 Session · Agent · Workflow · Job · Scheduler · Evaluator
 ```
 
-> 상태: Phase 2 완료 — **기능이 crate 경계 밖에서 등록된다**. 각 plugin은
-> `rivet-plugin.toml`을 들고 오고, 로더가 그것을 파싱해 ABI를 검사하고
-> `manifest ∩ profile`을 계산한 뒤 등록시킨다. 실패한 plugin은 아무것도 남기지 않는다.
-> 다음은 Phase 3(이벤트·TUI). 설계 문서는 [`docs/`](./docs)에 있다.
+> 상태: Phase 4 완료 — **위험한 도구가 판단을 거친다**. 모든 도구 호출이 policy chain을
+> 지나고, 승인과 거부는 세션 로그에 durable event로 남으며, 프로세스는 빈 환경에서 시작해
+> 취소되면 트리째 종료된다. 그 앞의 Phase 3이 이벤트 버스와 TUI를 놓았다.
+> 다음은 Phase 4.5(대화형 TUI). 설계 문서는 [`docs/`](./docs)에 있다.
 
 ---
 
@@ -50,26 +50,36 @@ rivet doctor                                      # 설정·deny list·자격증
 rivet plugin list                                 # 이 빌드가 가진 plugin (API 키 불필요)
 rivet plugin show rivet.tool-filesystem           # 매니페스트 + 프로파일 권한 교집합
 rivet plugin new acme.tool-lint                   # 새 plugin crate 스캐폴딩
+
+rivet --tui "..."                                 # 전체 화면 UI (Job 패널·Agent 패널·상태바)
+rivet --jsonl "..." | jq .                        # 줄 단위 JSON 이벤트 (관찰용)
+rivet --headless "..."                            # 사람에게 물어야 하는 것은 거부. CI용
+rivet --profile readonly "..."                    # 프로파일로 도구와 정책을 함께 좁힌다
 ```
 
 `rivet.example.toml`을 `rivet.toml`로 복사하면 그대로 동작한다. `[plugins].enabled`를
-비워 두면 이 빌드가 가진 plugin 전부가 로드된다.
+비워 두면 **기본 선택**이 로드된다 — 이 빌드의 카탈로그 전부가 아니다.
 
-**Phase 2부터 plugin id에 중간 범주는 없다.** 적은 id는 로드되거나 오타여서 시작할 때
-실패하거나 둘 중 하나다. `tool-shell` `tool-git` `policy-default` `sandbox-local`은
-Phase 4에서 오며, 그때까지 `enabled`에 적으면 실패한다 — 아무것도 등록하지 않는 plugin을
-목록에 끼워 넣는 것은 `rivet plugin list`에 거짓말을 하는 일이기 때문이다.
+**Phase 2부터 plugin id에 중간 범주는 없다.** 적은 id는 로드되거나, 오타여서 시작할 때
+실패하거나 둘 중 하나다 — 아무것도 등록하지 않는 plugin을 목록에 끼워 넣는 것은
+`rivet plugin list`에 거짓말을 하는 일이기 때문이다.
+
+`tool-shell` `tool-git` `policy-default` `sandbox-local`은 Phase 4에서 도착했고 넷 다 기본
+선택에 들어 있다. `policy-default`가 빠지면 정책 체인이 없는 실행이 되고, `sandbox-local`이
+빠지면 프로세스를 여는 도구가 갈 곳을 잃기 때문이다. 누가 그것들을 받는지는 이 목록이 아니라
+프로파일이 정한다. `telemetry-log`는 기본 선택 **밖**이라 `enabled`에 이름을 적어야 로드된다.
 
 두 가지는 이름과 달리 오해하기 쉬우므로 분명히 해 둔다.
 
 - **`--jsonl`은 관찰용이다.** 이벤트 버스는 설계상 lossy이므로(느린 구독자는 이벤트를
   잃고, 그 사실은 `SubscriberLagged`로 보고된다) 이 스트림으로 세션을 재구성할 수 없다.
   세션 재구성은 durable 로그를 읽는 `rivet session show --json`이다.
-- **`--profile`은 아직 policy가 아니다.** 프로파일은 에이전트에게 어떤 도구를
-  **제공할지**를 좁힌다(파이프라인 2단계). Phase 2부터 그 좁히기는 진짜 권한 교집합으로
-  일어난다 — `readonly`는 `rivet.tool-filesystem`의 매니페스트에서 `fs_write`를 없애고,
-  plugin은 `write_file`을 아예 등록하지 않는다. 그래도 이것은 정책 강제가 아니다. 진짜
-  policy chain과 승인은 Phase 4다.
+- **`--profile`은 한 층이 아니라 두 층이다.** 프로파일은 에이전트에게 어떤 도구를
+  **제공할지**를 좁히고(파이프라인 2단계), 그와 별개로 정책 체인이 **모든 호출에** 강제하는
+  grant를 계산한다(Phase 4). 두 층인 것이 핵심이다 — `readonly`에서 `rivet.tool-filesystem`은
+  매니페스트에서 `fs_write`를 잃어 `write_file`을 아예 등록하지 않고, 로더를 지나지 않고
+  레지스트리에 직접 들어온 쓰기 도구는 그 다음에 정책이 막는다. 그래서 이 보장에는 테스트가
+  하나가 아니라 둘이다.
 
 ---
 
@@ -80,7 +90,7 @@ crates/
   rivet-core       계약만. I/O 없음. 모든 plugin이 이것에 컴파일된다
   rivet-runtime    기본 실행 구현 (loop · dispatcher · bus · registry)
   rivet-session    append-only 이벤트 로그
-  rivet-job        Job 그래프 실행
+  rivet-job        Job 그래프 실행 (Phase 0에서 뼈대만, Phase 5가 채운다)
   rivet-plugin     탐색 · 매니페스트 · lifecycle
   rivet-tui        TUI (이벤트 스트림 소비자)
   rivet-cli        `rivet` 바이너리
@@ -93,6 +103,7 @@ plugins/                            각 crate가 rivet-plugin.toml을 함께 들
   tool-git         status · diff · log · commit
   policy-default   워크스페이스 봉쇄 · 파괴적 명령 게이트
   sandbox-local    로컬 실행 (약한 보장을 정직하게 신고)
+  telemetry-log    버스를 `tracing`으로 흘리는 구조화 로그 (기본 선택 밖)
 ```
 
 ---
@@ -100,7 +111,7 @@ plugins/                            각 crate가 rivet-plugin.toml을 함께 들
 ## 개발
 
 ```bash
-cargo test --workspace                    # 379 tests
+cargo test --workspace                    # 772 tests
 cargo clippy --workspace --all-targets    # 경고 0
 cargo fmt --all -- --check
 cargo doc --workspace --no-deps
